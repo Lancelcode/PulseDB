@@ -61,7 +61,29 @@ static void cmd_set(int fd, RespValue *cmd, Store *store) {
         send_error(fd, "wrong number of arguments for 'set'");
         return;
     }
-    store_set(store, cmd->elements[1].str, cmd->elements[2].str);
+
+    const char *key   = cmd->elements[1].str;
+    const char *value = cmd->elements[2].str;
+    int64_t     expires_at = 0;
+
+    /* Parse optional EX and PX arguments */
+    for (int i = 3; i < cmd->count - 1; i++) {
+        char opt[8];
+        snprintf(opt, sizeof(opt), "%s", cmd->elements[i].str);
+        str_toupper(opt);
+
+        if (strcmp(opt, "EX") == 0) {
+            long secs  = atol(cmd->elements[i + 1].str);
+            expires_at = now_ms() + secs * 1000;
+            i++;
+        } else if (strcmp(opt, "PX") == 0) {
+            long ms    = atol(cmd->elements[i + 1].str);
+            expires_at = now_ms() + ms;
+            i++;
+        }
+    }
+
+    store_set_with_expiry(store, key, value, expires_at);
     send_simple(fd, "OK");
 }
 
@@ -75,6 +97,42 @@ static void cmd_get(int fd, RespValue *cmd, Store *store) {
         send_bulk(fd, value);
     } else {
         send_null(fd);
+    }
+}
+
+static void cmd_ttl(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 2) {
+        send_error(fd, "wrong number of arguments for 'ttl'");
+        return;
+    }
+
+    int64_t expiry = store_get_expiry(store, cmd->elements[1].str);
+
+    if (expiry == -2) {
+        send_integer(fd, -2); /* key does not exist */
+    } else if (expiry == -1) {
+        send_integer(fd, -1); /* key exists but no expiry */
+    } else {
+        long secs = (long)((expiry - now_ms()) / 1000);
+        send_integer(fd, secs < 0 ? -2 : secs);
+    }
+}
+
+static void cmd_pttl(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 2) {
+        send_error(fd, "wrong number of arguments for 'pttl'");
+        return;
+    }
+
+    int64_t expiry = store_get_expiry(store, cmd->elements[1].str);
+
+    if (expiry == -2) {
+        send_integer(fd, -2); /* key does not exist */
+    } else if (expiry == -1) {
+        send_integer(fd, -1); /* key exists but no expiry */
+    } else {
+        long ms = (long)(expiry - now_ms());
+        send_integer(fd, ms < 0 ? -2 : ms);
     }
 }
 
@@ -96,6 +154,10 @@ void command_dispatch(int fd, RespValue *cmd, Store *store) {
         cmd_set(fd, cmd, store);
     } else if (strcmp(name, "GET") == 0) {
         cmd_get(fd, cmd, store);
+    } else if (strcmp(name, "TTL") == 0) {
+        cmd_ttl(fd, cmd, store);
+    } else if (strcmp(name, "PTTL") == 0) {
+        cmd_pttl(fd, cmd, store);
     } else {
         send_error(fd, "unknown command");
     }
