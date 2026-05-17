@@ -18,27 +18,26 @@ make
 ## Testing
 
 ```bash
-# Sorted Sets
-redis-cli zadd scores 1.0 alice 2.0 bob 3.0 charlie
-# Expected: 3
+# CONFIG GET
+redis-cli config get port
+# Expected: port, 6379
 
-redis-cli zrange scores 0 -1
-# Expected: alice, bob, charlie
+redis-cli config get *
+# Expected: all config key-value pairs
 
-redis-cli zrange scores 0 -1 WITHSCORES
-# Expected: alice 1, bob 2, charlie 3
+# KEYS
+redis-cli set foo 1
+redis-cli set bar 2
+redis-cli set baz 3
 
-redis-cli zrank scores bob
-# Expected: 1
+redis-cli keys "*"
+# Expected: foo, bar, baz
 
-redis-cli zcard scores
-# Expected: 3
+redis-cli keys "b*"
+# Expected: bar, baz
 
-redis-cli zscore scores alice
-# Expected: 1
-
-redis-cli zrangebyscore scores 1 2
-# Expected: alice, bob
+redis-cli keys "f??"
+# Expected: foo
 ```
 
 ## Features
@@ -53,7 +52,7 @@ redis-cli zrangebyscore scores 1 2
 - [x] Lists (LPUSH, RPUSH, LPOP, RPOP, LRANGE, LLEN, BLPOP)
 - [x] Hashes (HSET, HGET, HGETALL, HMGET, HDEL, HLEN)
 - [x] Sorted Sets (ZADD, ZRANGE, ZRANK, ZCARD, ZSCORE, ZRANGEBYSCORE)
-- [ ] CONFIG GET, KEYS
+- [x] CONFIG GET, KEYS
 - [ ] RDB persistence
 - [ ] Streams
 - [ ] Replication
