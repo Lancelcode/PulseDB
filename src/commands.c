@@ -4,7 +4,7 @@
 #include <unistd.h>
 #include <ctype.h>
 #include <limits.h>
-
+#include <sys/select.h>
 #include "commands.h"
 
 void send_simple(int fd, const char *msg) {
@@ -333,6 +333,50 @@ static void cmd_lrange(int fd, RespValue *cmd, Store *store) {
     }
 }
 
+static void cmd_blpop(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 3) {
+        send_error(fd, "wrong number of arguments for 'blpop'");
+        return;
+    }
+
+    /* Last argument is the timeout in seconds (0 = block forever) */
+    double timeout_secs = atof(cmd->elements[cmd->count - 1].str);
+    int64_t deadline    = timeout_secs > 0
+                          ? now_ms() + (int64_t)(timeout_secs * 1000)
+                          : 0;
+
+    /* Number of keys is everything between command name and timeout */
+    int num_keys = cmd->count - 2;
+
+    while (1) {
+        /* Try each key in order — return the first non-empty one */
+        for (int i = 1; i <= num_keys; i++) {
+            const char *key = cmd->elements[i].str;
+            char *value     = store_lpop(store, key);
+
+            if (value) {
+                send_array_header(fd, 2);
+                send_bulk(fd, key);
+                send_bulk(fd, value);
+                free(value);
+                return;
+            }
+        }
+
+        /* All lists empty — check if we have timed out */
+        if (deadline > 0 && now_ms() >= deadline) {
+            send_null(fd);
+            return;
+        }
+
+        /* Nothing available yet — sleep 100ms and retry */
+        struct timeval tv;
+        tv.tv_sec  = 0;
+        tv.tv_usec = 100000;
+        select(0, NULL, NULL, NULL, &tv);
+    }
+}
+
 void command_dispatch(int fd, RespValue *cmd, Store *store) {
     if (!cmd || cmd->type != RESP_ARRAY || cmd->count < 1) {
         send_error(fd, "invalid command");
@@ -358,7 +402,7 @@ void command_dispatch(int fd, RespValue *cmd, Store *store) {
     } else if (strcmp(name, "DEL") == 0) {
         cmd_del(fd, cmd, store);
     } else if (strcmp(name, "EXISTS") == 0) {
-        cmd_exists(fd, cmd);
+        cmd_exists(fd, cmd, store);
     } else if (strcmp(name, "TYPE") == 0) {
         cmd_type(fd, cmd, store);
     } else if (strcmp(name, "INCR") == 0) {
@@ -387,6 +431,8 @@ void command_dispatch(int fd, RespValue *cmd, Store *store) {
         cmd_llen(fd, cmd, store);
     } else if (strcmp(name, "LRANGE") == 0) {
         cmd_lrange(fd, cmd, store);
+    } else if (strcmp(name, "BLPOP") == 0) {
+        cmd_blpop(fd, cmd, store);
     } else {
         send_error(fd, "unknown command");
     }

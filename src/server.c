@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 
 #include "server.h"
@@ -88,7 +89,6 @@ void server_run(int server_fd) {
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
 
-    /* One shared store for all connections */
     Store *store = store_create();
 
     while (1) {
