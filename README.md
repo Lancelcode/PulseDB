@@ -20,17 +20,24 @@ make
 Start the server, then in a second terminal:
 
 ```bash
-# PING with no args
+# PING
 redis-cli ping
 # Expected: PONG
-
-# PING with a message
-redis-cli ping "hello"
-# Expected: hello
 
 # ECHO
 redis-cli echo "hello world"
 # Expected: hello world
+
+# SET and GET
+redis-cli set name "pulsedb"
+# Expected: OK
+
+redis-cli get name
+# Expected: pulsedb
+
+# GET a missing key
+redis-cli get missing
+# Expected: (nil)
 ```
 
 ## Features
@@ -38,7 +45,7 @@ redis-cli echo "hello world"
 - [x] TCP server
 - [x] RESP protocol parser
 - [x] PING / ECHO
-- [ ] SET / GET
+- [x] SET / GET
 - [ ] Expiry (EX, PX, TTL, PTTL)
 - [ ] DEL, EXISTS, TYPE
 - [ ] INCR / DECR
