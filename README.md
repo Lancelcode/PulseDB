@@ -35,28 +35,43 @@ redis-cli set name "pulsedb"
 redis-cli get name
 # Expected: pulsedb
 
-# SET with expiry in seconds
+# SET with expiry
 redis-cli set temp "bye" EX 5
-# Expected: OK
-
 redis-cli ttl temp
 # Expected: 5 (or less)
 
-redis-cli pttl temp
-# Expected: ~5000 (or less)
+# DEL single key
+redis-cli del name
+# Expected: 1
 
-# Wait 5 seconds, then:
-redis-cli get temp
+redis-cli get name
 # Expected: (nil)
 
-# Key with no expiry
-redis-cli set permanent "here"
-redis-cli ttl permanent
-# Expected: -1
+# DEL multiple keys
+redis-cli set a 1
+redis-cli set b 2
+redis-cli del a b missing
+# Expected: 2
 
-# Missing key
-redis-cli ttl missing
-# Expected: -2
+# EXISTS
+redis-cli set foo "bar"
+redis-cli exists foo
+# Expected: 1
+
+redis-cli exists missing
+# Expected: 0
+
+# EXISTS multiple keys
+redis-cli exists foo foo missing
+# Expected: 2
+
+# TYPE
+redis-cli set mykey "hello"
+redis-cli type mykey
+# Expected: string
+
+redis-cli type missing
+# Expected: none
 ```
 
 ## Features
@@ -66,7 +81,7 @@ redis-cli ttl missing
 - [x] PING / ECHO
 - [x] SET / GET
 - [x] Expiry (EX, PX, TTL, PTTL)
-- [ ] DEL, EXISTS, TYPE
+- [x] DEL, EXISTS, TYPE
 - [ ] INCR / DECR
 - [ ] Lists
 - [ ] Hashes
