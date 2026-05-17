@@ -35,47 +35,55 @@ static int entry_is_expired(StoreEntry *entry) {
     return now_ms() > entry->expires_at;
 }
 
+/* Find an existing entry by key, or NULL if not found */
+static StoreEntry *find_entry(Store *store, const char *key) {
+    unsigned int slot  = hash(key);
+    StoreEntry  *entry = store->buckets[slot];
+    while (entry) {
+        if (strcmp(entry->key, key) == 0) {
+            if (entry_is_expired(entry)) return NULL;
+            return entry;
+        }
+        entry = entry->next;
+    }
+    return NULL;
+}
+
+/* Create a brand new entry and insert it at the front of its bucket */
+static StoreEntry *create_entry(Store *store, const char *key, StoreType type) {
+    unsigned int slot  = hash(key);
+    StoreEntry  *entry = calloc(1, sizeof(StoreEntry));
+    entry->key         = strdup(key);
+    entry->type        = type;
+    entry->next        = store->buckets[slot];
+    store->buckets[slot] = entry;
+    return entry;
+}
+
 void store_set(Store *store, const char *key, const char *value) {
     store_set_with_expiry(store, key, value, 0);
 }
 
 void store_set_with_expiry(Store *store, const char *key, const char *value, int64_t expires_at_ms) {
-    unsigned int slot  = hash(key);
-    StoreEntry  *entry = store->buckets[slot];
+    StoreEntry *entry = find_entry(store, key);
 
-    while (entry) {
-        if (strcmp(entry->key, key) == 0) {
-            free(entry->value);
-            entry->value      = strdup(value);
-            entry->expires_at = expires_at_ms;
-            entry->type       = STORE_TYPE_STRING;
-            return;
-        }
-        entry = entry->next;
+    if (entry) {
+        free(entry->value);
+        entry->value      = strdup(value);
+        entry->expires_at = expires_at_ms;
+        entry->type       = STORE_TYPE_STRING;
+        return;
     }
 
-    StoreEntry *new_entry  = calloc(1, sizeof(StoreEntry));
-    new_entry->key         = strdup(key);
-    new_entry->value       = strdup(value);
-    new_entry->expires_at  = expires_at_ms;
-    new_entry->type        = STORE_TYPE_STRING;
-    new_entry->next        = store->buckets[slot];
-    store->buckets[slot]   = new_entry;
+    entry        = create_entry(store, key, STORE_TYPE_STRING);
+    entry->value = strdup(value);
+    entry->expires_at = expires_at_ms;
 }
 
 char *store_get(Store *store, const char *key) {
-    unsigned int slot  = hash(key);
-    StoreEntry  *entry = store->buckets[slot];
-
-    while (entry) {
-        if (strcmp(entry->key, key) == 0) {
-            if (entry_is_expired(entry)) return NULL;
-            return entry->value;
-        }
-        entry = entry->next;
-    }
-
-    return NULL;
+    StoreEntry *entry = find_entry(store, key);
+    if (!entry || entry->type != STORE_TYPE_STRING) return NULL;
+    return entry->value;
 }
 
 int64_t store_get_expiry(Store *store, const char *key) {
@@ -104,6 +112,16 @@ int store_del(Store *store, const char *key) {
             *curr = to_free->next;
             free(to_free->key);
             free(to_free->value);
+            if (to_free->type == STORE_TYPE_LIST && to_free->list) {
+                ListNode *node = to_free->list->head;
+                while (node) {
+                    ListNode *next = node->next;
+                    free(node->value);
+                    free(node);
+                    node = next;
+                }
+                free(to_free->list);
+            }
             free(to_free);
             return 1;
         }
@@ -114,32 +132,13 @@ int store_del(Store *store, const char *key) {
 }
 
 int store_exists(Store *store, const char *key) {
-    unsigned int slot  = hash(key);
-    StoreEntry  *entry = store->buckets[slot];
-
-    while (entry) {
-        if (strcmp(entry->key, key) == 0) {
-            return !entry_is_expired(entry);
-        }
-        entry = entry->next;
-    }
-
-    return 0;
+    return find_entry(store, key) != NULL;
 }
 
 StoreType store_type(Store *store, const char *key) {
-    unsigned int slot  = hash(key);
-    StoreEntry  *entry = store->buckets[slot];
-
-    while (entry) {
-        if (strcmp(entry->key, key) == 0) {
-            if (entry_is_expired(entry)) return -1;
-            return entry->type;
-        }
-        entry = entry->next;
-    }
-
-    return -1;
+    StoreEntry *entry = find_entry(store, key);
+    if (!entry) return -1;
+    return entry->type;
 }
 
 int64_t store_incrby(Store *store, const char *key, int64_t delta) {
@@ -149,21 +148,126 @@ int64_t store_incrby(Store *store, const char *key, int64_t delta) {
     if (current != NULL) {
         char *end;
         val = strtoll(current, &end, 10);
-
-        /* If end didn't reach the null terminator the value isn't an integer */
-        if (*end != '\0') {
-            return LLONG_MIN;
-        }
+        if (*end != '\0') return LLONG_MIN;
     }
 
     val += delta;
 
-    /* Store the new value back as a string */
     char buf[32];
     snprintf(buf, sizeof(buf), "%lld", (long long)val);
     store_set(store, key, buf);
 
     return val;
+}
+
+/* Get or create a list entry for the given key */
+static List *get_or_create_list(Store *store, const char *key) {
+    StoreEntry *entry = find_entry(store, key);
+
+    if (entry) {
+        if (entry->type != STORE_TYPE_LIST) return NULL; /* wrong type */
+        return entry->list;
+    }
+
+    entry       = create_entry(store, key, STORE_TYPE_LIST);
+    entry->list = calloc(1, sizeof(List));
+    return entry->list;
+}
+
+int store_lpush(Store *store, const char *key, const char *value) {
+    List *list = get_or_create_list(store, key);
+    if (!list) return -1;
+
+    ListNode *node = calloc(1, sizeof(ListNode));
+    node->value    = strdup(value);
+    node->next     = list->head;
+
+    if (list->head) {
+        list->head->prev = node;
+    } else {
+        list->tail = node; /* first element — also the tail */
+    }
+
+    list->head = node;
+    list->len++;
+    return list->len;
+}
+
+int store_rpush(Store *store, const char *key, const char *value) {
+    List *list = get_or_create_list(store, key);
+    if (!list) return -1;
+
+    ListNode *node = calloc(1, sizeof(ListNode));
+    node->value    = strdup(value);
+    node->prev     = list->tail;
+
+    if (list->tail) {
+        list->tail->next = node;
+    } else {
+        list->head = node; /* first element — also the head */
+    }
+
+    list->tail = node;
+    list->len++;
+    return list->len;
+}
+
+char *store_lpop(Store *store, const char *key) {
+    StoreEntry *entry = find_entry(store, key);
+    if (!entry || entry->type != STORE_TYPE_LIST) return NULL;
+
+    List     *list = entry->list;
+    ListNode *node = list->head;
+    if (!node) return NULL;
+
+    list->head = node->next;
+    if (list->head) {
+        list->head->prev = NULL;
+    } else {
+        list->tail = NULL; /* list is now empty */
+    }
+
+    list->len--;
+
+    /* Caller is responsible for freeing the returned string */
+    char *value = node->value;
+    free(node);
+    return value;
+}
+
+char *store_rpop(Store *store, const char *key) {
+    StoreEntry *entry = find_entry(store, key);
+    if (!entry || entry->type != STORE_TYPE_LIST) return NULL;
+
+    List     *list = entry->list;
+    ListNode *node = list->tail;
+    if (!node) return NULL;
+
+    list->tail = node->prev;
+    if (list->tail) {
+        list->tail->next = NULL;
+    } else {
+        list->head = NULL; /* list is now empty */
+    }
+
+    list->len--;
+
+    char *value = node->value;
+    free(node);
+    return value;
+}
+
+int store_llen(Store *store, const char *key) {
+    StoreEntry *entry = find_entry(store, key);
+    if (!entry) return 0;
+    if (entry->type != STORE_TYPE_LIST) return -1;
+    return entry->list->len;
+}
+
+List *store_get_list(Store *store, const char *key) {
+    StoreEntry *entry = find_entry(store, key);
+    if (!entry || entry->type != STORE_TYPE_LIST) return NULL;
+    return entry->list;
 }
 
 void store_destroy(Store *store) {
@@ -172,7 +276,18 @@ void store_destroy(Store *store) {
         while (entry) {
             StoreEntry *next = entry->next;
             free(entry->key);
-            free(entry->value);
+            if (entry->type == STORE_TYPE_STRING) {
+                free(entry->value);
+            } else if (entry->type == STORE_TYPE_LIST && entry->list) {
+                ListNode *node = entry->list->head;
+                while (node) {
+                    ListNode *nn = node->next;
+                    free(node->value);
+                    free(node);
+                    node = nn;
+                }
+                free(entry->list);
+            }
             free(entry);
             entry = next;
         }
