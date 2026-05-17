@@ -15,29 +15,18 @@ make
 ./pulsedb
 ```
 
-## Testing
+## RDB persistence
+
+On startup, PulseDB looks for `./dump.rdb` and loads any string keys it finds.
+To test with a real RDB file, generate one from Redis:
 
 ```bash
-# CONFIG GET
-redis-cli config get port
-# Expected: port, 6379
-
-redis-cli config get *
-# Expected: all config key-value pairs
-
-# KEYS
-redis-cli set foo 1
-redis-cli set bar 2
-redis-cli set baz 3
-
-redis-cli keys "*"
-# Expected: foo, bar, baz
-
-redis-cli keys "b*"
-# Expected: bar, baz
-
-redis-cli keys "f??"
-# Expected: foo
+redis-cli set foo bar
+redis-cli bgsave
+# copy dump.rdb to your PulseDB working directory
+./pulsedb
+redis-cli get foo
+# Expected: bar
 ```
 
 ## Features
@@ -53,7 +42,7 @@ redis-cli keys "f??"
 - [x] Hashes (HSET, HGET, HGETALL, HMGET, HDEL, HLEN)
 - [x] Sorted Sets (ZADD, ZRANGE, ZRANK, ZCARD, ZSCORE, ZRANGEBYSCORE)
 - [x] CONFIG GET, KEYS
-- [ ] RDB persistence
+- [x] RDB persistence
 - [ ] Streams
 - [ ] Replication
 - [ ] Transactions
