@@ -24,57 +24,47 @@ Start the server, then in a second terminal:
 redis-cli ping
 # Expected: PONG
 
-# ECHO
-redis-cli echo "hello world"
-# Expected: hello world
-
 # SET and GET
 redis-cli set name "pulsedb"
 redis-cli get name
 # Expected: pulsedb
 
-# SET with expiry
-redis-cli set temp "bye" EX 5
-redis-cli ttl temp
-# Expected: 5 (or less)
-
-# DEL and EXISTS
-redis-cli set a 1
-redis-cli set b 2
-redis-cli del a b missing
-# Expected: 2
-
-redis-cli exists a
-# Expected: 0
-
-# TYPE
-redis-cli set mykey "hello"
-redis-cli type mykey
-# Expected: string
-
-# INCR — creates key if missing, starting from 0
+# INCR / DECR
 redis-cli incr counter
 # Expected: 1
-
-redis-cli incr counter
-# Expected: 2
-
-# DECR
-redis-cli decr counter
-# Expected: 1
-
-# INCRBY
 redis-cli incrby counter 10
 # Expected: 11
 
-# DECRBY
-redis-cli decrby counter 5
-# Expected: 6
+# LPUSH and RPUSH
+redis-cli rpush mylist a b c
+# Expected: 3
 
-# Error on non-integer value
-redis-cli set foo "bar"
-redis-cli incr foo
-# Expected: (error) ERR value is not an integer or out of range
+# LRANGE — full list
+redis-cli lrange mylist 0 -1
+# Expected: a, b, c
+
+# LRANGE — last two elements
+redis-cli lrange mylist -2 -1
+# Expected: b, c
+
+# LLEN
+redis-cli llen mylist
+# Expected: 3
+
+# LPOP and RPOP
+redis-cli lpop mylist
+# Expected: a
+
+redis-cli rpop mylist
+# Expected: c
+
+# BLPOP with timeout
+redis-cli blpop mylist 2
+# Expected: mylist, b (pops immediately since list has data)
+
+# BLPOP on empty list — waits then returns nil
+redis-cli blpop emptylist 1
+# Expected: (nil) after 1 second
 ```
 
 ## Features
@@ -86,7 +76,7 @@ redis-cli incr foo
 - [x] Expiry (EX, PX, TTL, PTTL)
 - [x] DEL, EXISTS, TYPE
 - [x] INCR / DECR
-- [ ] Lists
+- [x] Lists (LPUSH, RPUSH, LPOP, RPOP, LRANGE, LLEN, BLPOP)
 - [ ] Hashes
 - [ ] Sorted Sets
 - [ ] RDB persistence
