@@ -17,24 +17,21 @@ make
 
 ## Testing the connection
 
-In a second terminal, you can test the server is accepting connections:
+Start the server, then in a second terminal:
 
 ```bash
 redis-cli ping
 ```
 
-Or with netcat:
-
-```bash
-echo "hello" | nc localhost 6379
-```
-
-You should see `client connected` printed in the server terminal.
+You should see the parsed command printed in the server terminal:
+client connected
+parsed command with 1 arg(s):
+[0] PING
 
 ## Features
 
 - [x] TCP server
-- [ ] RESP protocol parser
+- [x] RESP protocol parser
 - [ ] PING / ECHO
 - [ ] SET / GET
 - [ ] Expiry (EX, PX, TTL, PTTL)
