@@ -37,6 +37,13 @@ void send_integer(int fd, long val) {
     write(fd, buf, strlen(buf));
 }
 
+/* Send an array header — caller must then send exactly count elements */
+static void send_array_header(int fd, int count) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "*%d\r\n", count);
+    write(fd, buf, strlen(buf));
+}
+
 static void str_toupper(char *s) {
     for (; *s; s++) *s = toupper((unsigned char)*s);
 }
@@ -172,6 +179,8 @@ static void cmd_type(int fd, RespValue *cmd, Store *store) {
 
     if (t == STORE_TYPE_STRING) {
         send_simple(fd, "string");
+    } else if (t == STORE_TYPE_LIST) {
+        send_simple(fd, "list");
     } else {
         send_simple(fd, "none");
     }
@@ -183,7 +192,7 @@ static void cmd_incrby(int fd, RespValue *cmd, Store *store, int64_t delta_overr
         return;
     }
 
-    int64_t delta = use_override ? delta_override : atoll(cmd->elements[2].str);
+    int64_t delta  = use_override ? delta_override : atoll(cmd->elements[2].str);
     int64_t result = store_incrby(store, cmd->elements[1].str, delta);
 
     if (result == LLONG_MIN) {
@@ -192,6 +201,136 @@ static void cmd_incrby(int fd, RespValue *cmd, Store *store, int64_t delta_overr
     }
 
     send_integer(fd, (long)result);
+}
+
+static void cmd_lpush(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 3) {
+        send_error(fd, "wrong number of arguments for 'lpush'");
+        return;
+    }
+
+    const char *key = cmd->elements[1].str;
+    int len         = 0;
+
+    /* Push each value left — Redis pushes them in order so last arg ends up at head */
+    for (int i = 2; i < cmd->count; i++) {
+        len = store_lpush(store, key, cmd->elements[i].str);
+        if (len < 0) {
+            send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value");
+            return;
+        }
+    }
+
+    send_integer(fd, len);
+}
+
+static void cmd_rpush(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 3) {
+        send_error(fd, "wrong number of arguments for 'rpush'");
+        return;
+    }
+
+    const char *key = cmd->elements[1].str;
+    int len         = 0;
+
+    for (int i = 2; i < cmd->count; i++) {
+        len = store_rpush(store, key, cmd->elements[i].str);
+        if (len < 0) {
+            send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value");
+            return;
+        }
+    }
+
+    send_integer(fd, len);
+}
+
+static void cmd_lpop(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 2) {
+        send_error(fd, "wrong number of arguments for 'lpop'");
+        return;
+    }
+
+    char *value = store_lpop(store, cmd->elements[1].str);
+    if (value) {
+        send_bulk(fd, value);
+        free(value);
+    } else {
+        send_null(fd);
+    }
+}
+
+static void cmd_rpop(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 2) {
+        send_error(fd, "wrong number of arguments for 'rpop'");
+        return;
+    }
+
+    char *value = store_rpop(store, cmd->elements[1].str);
+    if (value) {
+        send_bulk(fd, value);
+        free(value);
+    } else {
+        send_null(fd);
+    }
+}
+
+static void cmd_llen(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 2) {
+        send_error(fd, "wrong number of arguments for 'llen'");
+        return;
+    }
+
+    int len = store_llen(store, cmd->elements[1].str);
+    if (len < 0) {
+        send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value");
+        return;
+    }
+
+    send_integer(fd, len);
+}
+
+static void cmd_lrange(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 4) {
+        send_error(fd, "wrong number of arguments for 'lrange'");
+        return;
+    }
+
+    List *list = store_get_list(store, cmd->elements[1].str);
+
+    if (!list) {
+        /* Empty or missing list returns empty array */
+        send_array_header(fd, 0);
+        return;
+    }
+
+    int len   = list->len;
+    int start = atoi(cmd->elements[2].str);
+    int stop  = atoi(cmd->elements[3].str);
+
+    /* Normalise negative indices — -1 means last element */
+    if (start < 0) start = len + start;
+    if (stop  < 0) stop  = len + stop;
+    if (start < 0) start = 0;
+    if (stop  >= len) stop = len - 1;
+
+    if (start > stop) {
+        send_array_header(fd, 0);
+        return;
+    }
+
+    int count = stop - start + 1;
+    send_array_header(fd, count);
+
+    /* Walk the list to the start index, then send count elements */
+    ListNode *node = list->head;
+    for (int i = 0; i < start && node; i++) {
+        node = node->next;
+    }
+
+    for (int i = 0; i < count && node; i++) {
+        send_bulk(fd, node->value);
+        node = node->next;
+    }
 }
 
 void command_dispatch(int fd, RespValue *cmd, Store *store) {
@@ -219,7 +358,7 @@ void command_dispatch(int fd, RespValue *cmd, Store *store) {
     } else if (strcmp(name, "DEL") == 0) {
         cmd_del(fd, cmd, store);
     } else if (strcmp(name, "EXISTS") == 0) {
-        cmd_exists(fd, cmd, store);
+        cmd_exists(fd, cmd);
     } else if (strcmp(name, "TYPE") == 0) {
         cmd_type(fd, cmd, store);
     } else if (strcmp(name, "INCR") == 0) {
@@ -229,14 +368,25 @@ void command_dispatch(int fd, RespValue *cmd, Store *store) {
     } else if (strcmp(name, "INCRBY") == 0) {
         cmd_incrby(fd, cmd, store, 0, 0);
     } else if (strcmp(name, "DECRBY") == 0) {
-        /* Negate the delta for decrement */
-        int64_t delta = -atoll(cmd->elements[2].str);
+        int64_t delta  = -atoll(cmd->elements[2].str);
         int64_t result = store_incrby(store, cmd->elements[1].str, delta);
         if (result == LLONG_MIN) {
             send_error(fd, "value is not an integer or out of range");
         } else {
             send_integer(fd, (long)result);
         }
+    } else if (strcmp(name, "LPUSH") == 0) {
+        cmd_lpush(fd, cmd, store);
+    } else if (strcmp(name, "RPUSH") == 0) {
+        cmd_rpush(fd, cmd, store);
+    } else if (strcmp(name, "LPOP") == 0) {
+        cmd_lpop(fd, cmd, store);
+    } else if (strcmp(name, "RPOP") == 0) {
+        cmd_rpop(fd, cmd, store);
+    } else if (strcmp(name, "LLEN") == 0) {
+        cmd_llen(fd, cmd, store);
+    } else if (strcmp(name, "LRANGE") == 0) {
+        cmd_lrange(fd, cmd, store);
     } else {
         send_error(fd, "unknown command");
     }
