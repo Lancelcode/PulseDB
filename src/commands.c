@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <limits.h>
 
 #include "commands.h"
 
@@ -176,6 +177,23 @@ static void cmd_type(int fd, RespValue *cmd, Store *store) {
     }
 }
 
+static void cmd_incrby(int fd, RespValue *cmd, Store *store, int64_t delta_override, int use_override) {
+    if (cmd->count < 2) {
+        send_error(fd, "wrong number of arguments");
+        return;
+    }
+
+    int64_t delta = use_override ? delta_override : atoll(cmd->elements[2].str);
+    int64_t result = store_incrby(store, cmd->elements[1].str, delta);
+
+    if (result == LLONG_MIN) {
+        send_error(fd, "value is not an integer or out of range");
+        return;
+    }
+
+    send_integer(fd, (long)result);
+}
+
 void command_dispatch(int fd, RespValue *cmd, Store *store) {
     if (!cmd || cmd->type != RESP_ARRAY || cmd->count < 1) {
         send_error(fd, "invalid command");
@@ -204,6 +222,21 @@ void command_dispatch(int fd, RespValue *cmd, Store *store) {
         cmd_exists(fd, cmd, store);
     } else if (strcmp(name, "TYPE") == 0) {
         cmd_type(fd, cmd, store);
+    } else if (strcmp(name, "INCR") == 0) {
+        cmd_incrby(fd, cmd, store, 1, 1);
+    } else if (strcmp(name, "DECR") == 0) {
+        cmd_incrby(fd, cmd, store, -1, 1);
+    } else if (strcmp(name, "INCRBY") == 0) {
+        cmd_incrby(fd, cmd, store, 0, 0);
+    } else if (strcmp(name, "DECRBY") == 0) {
+        /* Negate the delta for decrement */
+        int64_t delta = -atoll(cmd->elements[2].str);
+        int64_t result = store_incrby(store, cmd->elements[1].str, delta);
+        if (result == LLONG_MIN) {
+            send_error(fd, "value is not an integer or out of range");
+        } else {
+            send_integer(fd, (long)result);
+        }
     } else {
         send_error(fd, "unknown command");
     }

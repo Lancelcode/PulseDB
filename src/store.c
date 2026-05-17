@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <limits.h>
 
 #include "store.h"
 
@@ -94,22 +95,22 @@ int64_t store_get_expiry(Store *store, const char *key) {
 }
 
 int store_del(Store *store, const char *key) {
-    unsigned int  slot  = hash(key);
-    StoreEntry  **curr  = &store->buckets[slot];
+    unsigned int  slot = hash(key);
+    StoreEntry  **curr = &store->buckets[slot];
 
     while (*curr) {
         if (strcmp((*curr)->key, key) == 0) {
             StoreEntry *to_free = *curr;
-            *curr = to_free->next; /* unlink from list */
+            *curr = to_free->next;
             free(to_free->key);
             free(to_free->value);
             free(to_free);
-            return 1; /* deleted */
+            return 1;
         }
         curr = &(*curr)->next;
     }
 
-    return 0; /* key not found */
+    return 0;
 }
 
 int store_exists(Store *store, const char *key) {
@@ -138,7 +139,31 @@ StoreType store_type(Store *store, const char *key) {
         entry = entry->next;
     }
 
-    return -1; /* key not found */
+    return -1;
+}
+
+int64_t store_incrby(Store *store, const char *key, int64_t delta) {
+    char *current = store_get(store, key);
+    int64_t val   = 0;
+
+    if (current != NULL) {
+        char *end;
+        val = strtoll(current, &end, 10);
+
+        /* If end didn't reach the null terminator the value isn't an integer */
+        if (*end != '\0') {
+            return LLONG_MIN;
+        }
+    }
+
+    val += delta;
+
+    /* Store the new value back as a string */
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%lld", (long long)val);
+    store_set(store, key, buf);
+
+    return val;
 }
 
 void store_destroy(Store *store) {
