@@ -7,6 +7,7 @@
 
 #include "server.h"
 #include "resp.h"
+#include "commands.h"
 
 int server_listen(int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -38,7 +39,6 @@ int server_listen(int port) {
     return fd;
 }
 
-/* Read all available bytes from client into a heap buffer */
 static char *read_client(int client_fd, ssize_t *out_len) {
     size_t capacity = 4096;
     size_t total    = 0;
@@ -78,22 +78,8 @@ static void handle_client(int client_fd) {
         return;
     }
 
-    /* Print what we parsed — just for debugging at this stage */
-    if (cmd->type == RESP_ARRAY) {
-        printf("parsed command with %d arg(s):\n", cmd->count);
-        for (int i = 0; i < cmd->count; i++) {
-            if (cmd->elements[i].str) {
-                printf("  [%d] %s\n", i, cmd->elements[i].str);
-            }
-        }
-    }
-
+    command_dispatch(client_fd, cmd);
     resp_free(cmd);
-
-    /* Send a placeholder OK so redis-cli does not hang */
-    const char *ok = "+OK\r\n";
-    write(client_fd, ok, strlen(ok));
-
     close(client_fd);
 }
 
