@@ -1,0 +1,23 @@
+# compiled binary
+pulsedb
+
+# object files
+*.o
+
+# build artifacts
+*.out
+*.a
+*.so
+
+# RDB persistence file
+dump.rdb
+
+# editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db

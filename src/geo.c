@@ -4,7 +4,7 @@
 #include "geo.h"
 
 #define _POSIX_C_SOURCE 200809L
-#define _GNU_SOURCE
+
 
 #define GEO_LAT_MIN  -85.05112878
 #define GEO_LAT_MAX   85.05112878
