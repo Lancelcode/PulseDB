@@ -474,7 +474,193 @@ static void cmd_keys(int fd, RespValue *cmd, Store *store) {
         }
     }
 }
+static void cmd_xadd(int fd, RespValue *cmd, Store *store) {
+    /* XADD key id field value [field value ...] */
+    if (cmd->count < 5 || (cmd->count % 2) == 0) {
+        send_error(fd, "wrong number of arguments for 'xadd'");
+        return;
+    }
 
+    const char *key = cmd->elements[1].str;
+    const char *id  = cmd->elements[2].str;
+
+    int num_fields       = (cmd->count - 3) / 2;
+    const char **fields  = malloc(num_fields * sizeof(char *));
+    const char **values  = malloc(num_fields * sizeof(char *));
+
+    for (int i = 0; i < num_fields; i++) {
+        fields[i] = cmd->elements[3 + i * 2].str;
+        values[i] = cmd->elements[4 + i * 2].str;
+    }
+
+    char *generated_id = store_xadd(store, key, id, fields, values, num_fields);
+    free(fields);
+    free(values);
+
+    if (!generated_id) {
+        send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value");
+        return;
+    }
+
+    send_bulk(fd, generated_id);
+    free(generated_id);
+}
+
+static void send_stream_entry(int fd, StreamEntry *entry) {
+    /* Each entry is a 2-element array: [id, [field, value, ...]] */
+    char id_buf[64];
+    snprintf(id_buf, sizeof(id_buf), "%llu-%llu",
+             (unsigned long long)entry->ms,
+             (unsigned long long)entry->seq);
+
+    send_array_header(fd, 2);
+    send_bulk(fd, id_buf);
+
+    /* Count fields */
+    int count = 0;
+    StreamField *f = entry->fields;
+    while (f) { count++; f = f->next; }
+
+    send_array_header(fd, count * 2);
+
+    /* Fields are stored in reverse order — send them as-is for simplicity */
+    f = entry->fields;
+    while (f) {
+        send_bulk(fd, f->field);
+        send_bulk(fd, f->value);
+        f = f->next;
+    }
+}
+
+static void cmd_xrange(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 4) {
+        send_error(fd, "wrong number of arguments for 'xrange'");
+        return;
+    }
+
+    Stream *stream = store_get_stream(store, cmd->elements[1].str);
+    if (!stream) { send_array_header(fd, 0); return; }
+
+    const char *start_str = cmd->elements[2].str;
+    const char *end_str   = cmd->elements[3].str;
+
+    uint64_t start_ms  = 0, start_seq = 0;
+    uint64_t end_ms    = UINT64_MAX, end_seq = UINT64_MAX;
+
+    if (strcmp(start_str, "-") != 0) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "%s", start_str);
+        char *dash = strchr(buf, '-');
+        if (dash) { *dash = '\0'; start_ms = strtoull(buf, NULL, 10); start_seq = strtoull(dash + 1, NULL, 10); }
+        else { start_ms = strtoull(buf, NULL, 10); start_seq = 0; }
+    }
+
+    if (strcmp(end_str, "+") != 0) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "%s", end_str);
+        char *dash = strchr(buf, '-');
+        if (dash) { *dash = '\0'; end_ms = strtoull(buf, NULL, 10); end_seq = strtoull(dash + 1, NULL, 10); }
+        else { end_ms = strtoull(buf, NULL, 10); end_seq = UINT64_MAX; }
+    }
+
+    /* Count matching entries */
+    int count = 0;
+    StreamEntry *entry = stream->head;
+    while (entry) {
+        if ((entry->ms > start_ms || (entry->ms == start_ms && entry->seq >= start_seq)) &&
+            (entry->ms < end_ms   || (entry->ms == end_ms   && entry->seq <= end_seq))) {
+            count++;
+        }
+        entry = entry->next;
+    }
+
+    send_array_header(fd, count);
+
+    entry = stream->head;
+    while (entry) {
+        if ((entry->ms > start_ms || (entry->ms == start_ms && entry->seq >= start_seq)) &&
+            (entry->ms < end_ms   || (entry->ms == end_ms   && entry->seq <= end_seq))) {
+            send_stream_entry(fd, entry);
+        }
+        entry = entry->next;
+    }
+}
+
+static void cmd_xread(int fd, RespValue *cmd, Store *store) {
+    /* XREAD COUNT n STREAMS key1 key2 id1 id2 */
+    if (cmd->count < 4) {
+        send_error(fd, "wrong number of arguments for 'xread'");
+        return;
+    }
+
+    int arg_idx = 1;
+    int count   = 0; /* 0 = no limit */
+
+    char opt[16];
+    snprintf(opt, sizeof(opt), "%s", cmd->elements[arg_idx].str);
+    str_toupper(opt);
+
+    if (strcmp(opt, "COUNT") == 0) {
+        count   = atoi(cmd->elements[arg_idx + 1].str);
+        arg_idx += 2;
+    }
+
+    /* Expect STREAMS keyword */
+    snprintf(opt, sizeof(opt), "%s", cmd->elements[arg_idx].str);
+    str_toupper(opt);
+    if (strcmp(opt, "STREAMS") != 0) {
+        send_error(fd, "syntax error");
+        return;
+    }
+    arg_idx++;
+
+    int num_keys = (cmd->count - arg_idx) / 2;
+    if (num_keys < 1) { send_error(fd, "syntax error"); return; }
+
+    send_array_header(fd, num_keys);
+
+    for (int k = 0; k < num_keys; k++) {
+        const char *key      = cmd->elements[arg_idx + k].str;
+        const char *id_start = cmd->elements[arg_idx + num_keys + k].str;
+
+        uint64_t start_ms = 0, start_seq = 0;
+
+        if (strcmp(id_start, "0") != 0 && strcmp(id_start, "0-0") != 0) {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "%s", id_start);
+            char *dash = strchr(buf, '-');
+            if (dash) { *dash = '\0'; start_ms = strtoull(buf, NULL, 10); start_seq = strtoull(dash + 1, NULL, 10) + 1; }
+            else { start_ms = strtoull(buf, NULL, 10); start_seq = 0; }
+        }
+
+        Stream *stream = store_get_stream(store, key);
+
+        send_array_header(fd, 2);
+        send_bulk(fd, key);
+
+        if (!stream) { send_array_header(fd, 0); continue; }
+
+        int matched = 0;
+        StreamEntry *entry = stream->head;
+        while (entry) {
+            if (entry->ms > start_ms || (entry->ms == start_ms && entry->seq >= start_seq)) matched++;
+            entry = entry->next;
+        }
+
+        if (count > 0 && matched > count) matched = count;
+        send_array_header(fd, matched);
+
+        int sent  = 0;
+        entry = stream->head;
+        while (entry && (count == 0 || sent < count)) {
+            if (entry->ms > start_ms || (entry->ms == start_ms && entry->seq >= start_seq)) {
+                send_stream_entry(fd, entry);
+                sent++;
+            }
+            entry = entry->next;
+        }
+    }
+}
 void command_dispatch(int fd, RespValue *cmd, Store *store, Config *cfg) {
     if (!cmd || cmd->type != RESP_ARRAY || cmd->count < 1) {
         send_error(fd, "invalid command");
@@ -503,6 +689,8 @@ void command_dispatch(int fd, RespValue *cmd, Store *store, Config *cfg) {
         cmd_exists(fd, cmd, store);
     } else if (strcmp(name, "TYPE") == 0) {
         cmd_type(fd, cmd, store);
+    } else if (t == STORE_TYPE_STREAM) {
+        send_simple(fd, "stream");
     } else if (strcmp(name, "INCR") == 0) {
         cmd_incrby(fd, cmd, store, 1, 1);
     } else if (strcmp(name, "DECR") == 0) {
@@ -568,6 +756,12 @@ void command_dispatch(int fd, RespValue *cmd, Store *store, Config *cfg) {
         }
     } else if (strcmp(name, "KEYS") == 0) {
         cmd_keys(fd, cmd, store);
+    } else if (strcmp(name, "XADD") == 0) {
+        cmd_xadd(fd, cmd, store);
+    } else if (strcmp(name, "XRANGE") == 0) {
+        cmd_xrange(fd, cmd, store);
+    } else if (strcmp(name, "XREAD") == 0) {
+        cmd_xread(fd, cmd, store);
     } else {
         send_error(fd, "unknown command");
     }
