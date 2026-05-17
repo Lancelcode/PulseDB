@@ -30,6 +30,5 @@ make
 - [x] CONFIG GET, KEYS
 - [x] RDB persistence
 - [x] Streams (XADD, XRANGE, XREAD)
-- [ ] Replication
-- [ ] Transactions
+- [x] Transactions (MULTI, EXEC, DISCARD)
 - [ ] Geo commands
