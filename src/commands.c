@@ -5,6 +5,7 @@
 #include <ctype.h>
 #include <limits.h>
 #include <sys/select.h>
+#include <fnmatch.h>
 
 #include "commands.h"
 #include "store.h"
@@ -113,9 +114,7 @@ static void cmd_ttl(int fd, RespValue *cmd, Store *store) {
         send_error(fd, "wrong number of arguments for 'ttl'");
         return;
     }
-
     int64_t expiry = store_get_expiry(store, cmd->elements[1].str);
-
     if (expiry == -2) {
         send_integer(fd, -2);
     } else if (expiry == -1) {
@@ -131,9 +130,7 @@ static void cmd_pttl(int fd, RespValue *cmd, Store *store) {
         send_error(fd, "wrong number of arguments for 'pttl'");
         return;
     }
-
     int64_t expiry = store_get_expiry(store, cmd->elements[1].str);
-
     if (expiry == -2) {
         send_integer(fd, -2);
     } else if (expiry == -1) {
@@ -149,7 +146,6 @@ static void cmd_del(int fd, RespValue *cmd, Store *store) {
         send_error(fd, "wrong number of arguments for 'del'");
         return;
     }
-
     int deleted = 0;
     for (int i = 1; i < cmd->count; i++) {
         deleted += store_del(store, cmd->elements[i].str);
@@ -162,7 +158,6 @@ static void cmd_exists(int fd, RespValue *cmd, Store *store) {
         send_error(fd, "wrong number of arguments for 'exists'");
         return;
     }
-
     int found = 0;
     for (int i = 1; i < cmd->count; i++) {
         found += store_exists(store, cmd->elements[i].str);
@@ -175,9 +170,7 @@ static void cmd_type(int fd, RespValue *cmd, Store *store) {
         send_error(fd, "wrong number of arguments for 'type'");
         return;
     }
-
     StoreType t = store_type(store, cmd->elements[1].str);
-
     if (t == STORE_TYPE_STRING) {
         send_simple(fd, "string");
     } else if (t == STORE_TYPE_LIST) {
@@ -196,335 +189,167 @@ static void cmd_incrby(int fd, RespValue *cmd, Store *store, int64_t delta_overr
         send_error(fd, "wrong number of arguments");
         return;
     }
-
     int64_t delta  = use_override ? delta_override : atoll(cmd->elements[2].str);
     int64_t result = store_incrby(store, cmd->elements[1].str, delta);
-
     if (result == LLONG_MIN) {
         send_error(fd, "value is not an integer or out of range");
         return;
     }
-
     send_integer(fd, (long)result);
 }
 
 static void cmd_lpush(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 3) {
-        send_error(fd, "wrong number of arguments for 'lpush'");
-        return;
-    }
-
+    if (cmd->count < 3) { send_error(fd, "wrong number of arguments for 'lpush'"); return; }
     const char *key = cmd->elements[1].str;
-    int len         = 0;
-
+    int len = 0;
     for (int i = 2; i < cmd->count; i++) {
         len = store_lpush(store, key, cmd->elements[i].str);
-        if (len < 0) {
-            send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value");
-            return;
-        }
+        if (len < 0) { send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value"); return; }
     }
-
     send_integer(fd, len);
 }
 
 static void cmd_rpush(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 3) {
-        send_error(fd, "wrong number of arguments for 'rpush'");
-        return;
-    }
-
+    if (cmd->count < 3) { send_error(fd, "wrong number of arguments for 'rpush'"); return; }
     const char *key = cmd->elements[1].str;
-    int len         = 0;
-
+    int len = 0;
     for (int i = 2; i < cmd->count; i++) {
         len = store_rpush(store, key, cmd->elements[i].str);
-        if (len < 0) {
-            send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value");
-            return;
-        }
+        if (len < 0) { send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value"); return; }
     }
-
     send_integer(fd, len);
 }
 
 static void cmd_lpop(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 2) {
-        send_error(fd, "wrong number of arguments for 'lpop'");
-        return;
-    }
-
+    if (cmd->count < 2) { send_error(fd, "wrong number of arguments for 'lpop'"); return; }
     char *value = store_lpop(store, cmd->elements[1].str);
-    if (value) {
-        send_bulk(fd, value);
-        free(value);
-    } else {
-        send_null(fd);
-    }
+    if (value) { send_bulk(fd, value); free(value); } else { send_null(fd); }
 }
 
 static void cmd_rpop(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 2) {
-        send_error(fd, "wrong number of arguments for 'rpop'");
-        return;
-    }
-
+    if (cmd->count < 2) { send_error(fd, "wrong number of arguments for 'rpop'"); return; }
     char *value = store_rpop(store, cmd->elements[1].str);
-    if (value) {
-        send_bulk(fd, value);
-        free(value);
-    } else {
-        send_null(fd);
-    }
+    if (value) { send_bulk(fd, value); free(value); } else { send_null(fd); }
 }
 
 static void cmd_llen(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 2) {
-        send_error(fd, "wrong number of arguments for 'llen'");
-        return;
-    }
-
+    if (cmd->count < 2) { send_error(fd, "wrong number of arguments for 'llen'"); return; }
     int len = store_llen(store, cmd->elements[1].str);
-    if (len < 0) {
-        send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value");
-        return;
-    }
-
+    if (len < 0) { send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value"); return; }
     send_integer(fd, len);
 }
 
 static void cmd_lrange(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 4) {
-        send_error(fd, "wrong number of arguments for 'lrange'");
-        return;
-    }
-
+    if (cmd->count < 4) { send_error(fd, "wrong number of arguments for 'lrange'"); return; }
     List *list = store_get_list(store, cmd->elements[1].str);
-
-    if (!list) {
-        send_array_header(fd, 0);
-        return;
-    }
-
+    if (!list) { send_array_header(fd, 0); return; }
     int len   = list->len;
     int start = atoi(cmd->elements[2].str);
     int stop  = atoi(cmd->elements[3].str);
-
     if (start < 0) start = len + start;
     if (stop  < 0) stop  = len + stop;
     if (start < 0) start = 0;
     if (stop  >= len) stop = len - 1;
-
-    if (start > stop) {
-        send_array_header(fd, 0);
-        return;
-    }
-
+    if (start > stop) { send_array_header(fd, 0); return; }
     int count = stop - start + 1;
     send_array_header(fd, count);
-
     ListNode *node = list->head;
-    for (int i = 0; i < start && node; i++) {
-        node = node->next;
-    }
-
-    for (int i = 0; i < count && node; i++) {
-        send_bulk(fd, node->value);
-        node = node->next;
-    }
+    for (int i = 0; i < start && node; i++) node = node->next;
+    for (int i = 0; i < count && node; i++) { send_bulk(fd, node->value); node = node->next; }
 }
 
 static void cmd_blpop(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 3) {
-        send_error(fd, "wrong number of arguments for 'blpop'");
-        return;
-    }
-
+    if (cmd->count < 3) { send_error(fd, "wrong number of arguments for 'blpop'"); return; }
     double  timeout_secs = atof(cmd->elements[cmd->count - 1].str);
-    int64_t deadline     = timeout_secs > 0
-                           ? now_ms() + (int64_t)(timeout_secs * 1000)
-                           : 0;
-
+    int64_t deadline     = timeout_secs > 0 ? now_ms() + (int64_t)(timeout_secs * 1000) : 0;
     int num_keys = cmd->count - 2;
-
     while (1) {
         for (int i = 1; i <= num_keys; i++) {
             const char *key = cmd->elements[i].str;
             char *value     = store_lpop(store, key);
-
-            if (value) {
-                send_array_header(fd, 2);
-                send_bulk(fd, key);
-                send_bulk(fd, value);
-                free(value);
-                return;
-            }
+            if (value) { send_array_header(fd, 2); send_bulk(fd, key); send_bulk(fd, value); free(value); return; }
         }
-
-        if (deadline > 0 && now_ms() >= deadline) {
-            send_null(fd);
-            return;
-        }
-
-        struct timeval tv;
-        tv.tv_sec  = 0;
-        tv.tv_usec = 100000;
+        if (deadline > 0 && now_ms() >= deadline) { send_null(fd); return; }
+        struct timeval tv; tv.tv_sec = 0; tv.tv_usec = 100000;
         select(0, NULL, NULL, NULL, &tv);
     }
 }
 
 static void cmd_hset(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 4 || (cmd->count % 2) != 0) {
-        send_error(fd, "wrong number of arguments for 'hset'");
-        return;
-    }
-
+    if (cmd->count < 4 || (cmd->count % 2) != 0) { send_error(fd, "wrong number of arguments for 'hset'"); return; }
     const char *key = cmd->elements[1].str;
-    int added       = 0;
-
+    int added = 0;
     for (int i = 2; i < cmd->count - 1; i += 2) {
         int result = store_hset(store, key, cmd->elements[i].str, cmd->elements[i + 1].str);
-        if (result < 0) {
-            send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value");
-            return;
-        }
+        if (result < 0) { send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value"); return; }
         added += result;
     }
-
     send_integer(fd, added);
 }
 
 static void cmd_hget(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 3) {
-        send_error(fd, "wrong number of arguments for 'hget'");
-        return;
-    }
-
+    if (cmd->count < 3) { send_error(fd, "wrong number of arguments for 'hget'"); return; }
     char *value = store_hget(store, cmd->elements[1].str, cmd->elements[2].str);
-    if (value) {
-        send_bulk(fd, value);
-    } else {
-        send_null(fd);
-    }
+    if (value) { send_bulk(fd, value); } else { send_null(fd); }
 }
 
 static void cmd_hgetall(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 2) {
-        send_error(fd, "wrong number of arguments for 'hgetall'");
-        return;
-    }
-
+    if (cmd->count < 2) { send_error(fd, "wrong number of arguments for 'hgetall'"); return; }
     Hash *hash = store_get_hash(store, cmd->elements[1].str);
-
-    if (!hash) {
-        send_array_header(fd, 0);
-        return;
-    }
-
+    if (!hash) { send_array_header(fd, 0); return; }
     send_array_header(fd, hash->len * 2);
-
     for (int i = 0; i < HASH_NUM_BUCKETS; i++) {
         HashField *hf = hash->buckets[i];
-        while (hf) {
-            send_bulk(fd, hf->field);
-            send_bulk(fd, hf->value);
-            hf = hf->next;
-        }
+        while (hf) { send_bulk(fd, hf->field); send_bulk(fd, hf->value); hf = hf->next; }
     }
 }
 
 static void cmd_hmget(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 3) {
-        send_error(fd, "wrong number of arguments for 'hmget'");
-        return;
-    }
-
-    int num_fields = cmd->count - 2;
-    send_array_header(fd, num_fields);
-
+    if (cmd->count < 3) { send_error(fd, "wrong number of arguments for 'hmget'"); return; }
+    send_array_header(fd, cmd->count - 2);
     for (int i = 2; i < cmd->count; i++) {
         char *value = store_hget(store, cmd->elements[1].str, cmd->elements[i].str);
-        if (value) {
-            send_bulk(fd, value);
-        } else {
-            send_null(fd);
-        }
+        if (value) { send_bulk(fd, value); } else { send_null(fd); }
     }
 }
 
 static void cmd_hdel(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 3) {
-        send_error(fd, "wrong number of arguments for 'hdel'");
-        return;
-    }
-
+    if (cmd->count < 3) { send_error(fd, "wrong number of arguments for 'hdel'"); return; }
     int deleted = 0;
-    for (int i = 2; i < cmd->count; i++) {
-        deleted += store_hdel(store, cmd->elements[1].str, cmd->elements[i].str);
-    }
-
+    for (int i = 2; i < cmd->count; i++) deleted += store_hdel(store, cmd->elements[1].str, cmd->elements[i].str);
     send_integer(fd, deleted);
 }
 
 static void cmd_hlen(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 2) {
-        send_error(fd, "wrong number of arguments for 'hlen'");
-        return;
-    }
-
+    if (cmd->count < 2) { send_error(fd, "wrong number of arguments for 'hlen'"); return; }
     send_integer(fd, store_hlen(store, cmd->elements[1].str));
 }
 
 static void cmd_zadd(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 4 || (cmd->count % 2) != 0) {
-        send_error(fd, "wrong number of arguments for 'zadd'");
-        return;
-    }
-
+    if (cmd->count < 4 || (cmd->count % 2) != 0) { send_error(fd, "wrong number of arguments for 'zadd'"); return; }
     const char *key = cmd->elements[1].str;
-    int added       = 0;
-
+    int added = 0;
     for (int i = 2; i < cmd->count - 1; i += 2) {
-        double score  = atof(cmd->elements[i].str);
-        int result    = store_zadd(store, key, score, cmd->elements[i + 1].str);
-        if (result < 0) {
-            send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value");
-            return;
-        }
+        double score = atof(cmd->elements[i].str);
+        int result   = store_zadd(store, key, score, cmd->elements[i + 1].str);
+        if (result < 0) { send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value"); return; }
         added += result;
     }
-
     send_integer(fd, added);
 }
 
 static void cmd_zrange(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 4) {
-        send_error(fd, "wrong number of arguments for 'zrange'");
-        return;
-    }
-
+    if (cmd->count < 4) { send_error(fd, "wrong number of arguments for 'zrange'"); return; }
     ZSet *zset = store_get_zset(store, cmd->elements[1].str);
-
-    if (!zset) {
-        send_array_header(fd, 0);
-        return;
-    }
-
+    if (!zset) { send_array_header(fd, 0); return; }
     int len   = zset->len;
     int start = atoi(cmd->elements[2].str);
     int stop  = atoi(cmd->elements[3].str);
-
     if (start < 0) start = len + start;
     if (stop  < 0) stop  = len + stop;
     if (start < 0) start = 0;
     if (stop  >= len) stop = len - 1;
-
-    if (start > stop) {
-        send_array_header(fd, 0);
-        return;
-    }
-
-    /* Check for optional WITHSCORES flag */
+    if (start > stop) { send_array_header(fd, 0); return; }
     int withscores = 0;
     if (cmd->count > 4) {
         char opt[16];
@@ -532,10 +357,8 @@ static void cmd_zrange(int fd, RespValue *cmd, Store *store) {
         str_toupper(opt);
         if (strcmp(opt, "WITHSCORES") == 0) withscores = 1;
     }
-
     int count = stop - start + 1;
     send_array_header(fd, withscores ? count * 2 : count);
-
     for (int i = start; i <= stop; i++) {
         send_bulk(fd, zset->entries[i].member);
         if (withscores) {
@@ -547,41 +370,21 @@ static void cmd_zrange(int fd, RespValue *cmd, Store *store) {
 }
 
 static void cmd_zrank(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 3) {
-        send_error(fd, "wrong number of arguments for 'zrank'");
-        return;
-    }
-
+    if (cmd->count < 3) { send_error(fd, "wrong number of arguments for 'zrank'"); return; }
     int rank = store_zrank(store, cmd->elements[1].str, cmd->elements[2].str);
-
-    if (rank < 0) {
-        send_null(fd);
-    } else {
-        send_integer(fd, rank);
-    }
+    if (rank < 0) { send_null(fd); } else { send_integer(fd, rank); }
 }
 
 static void cmd_zcard(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 2) {
-        send_error(fd, "wrong number of arguments for 'zcard'");
-        return;
-    }
-
+    if (cmd->count < 2) { send_error(fd, "wrong number of arguments for 'zcard'"); return; }
     send_integer(fd, store_zcard(store, cmd->elements[1].str));
 }
 
 static void cmd_zscore(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 3) {
-        send_error(fd, "wrong number of arguments for 'zscore'");
-        return;
-    }
-
-    int    found = 0;
+    if (cmd->count < 3) { send_error(fd, "wrong number of arguments for 'zscore'"); return; }
+    int found = 0;
     double score = store_zscore(store, cmd->elements[1].str, cmd->elements[2].str, &found);
-
-    if (!found) {
-        send_null(fd);
-    } else {
+    if (!found) { send_null(fd); } else {
         char buf[64];
         snprintf(buf, sizeof(buf), "%g", score);
         send_bulk(fd, buf);
@@ -589,31 +392,16 @@ static void cmd_zscore(int fd, RespValue *cmd, Store *store) {
 }
 
 static void cmd_zrangebyscore(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 4) {
-        send_error(fd, "wrong number of arguments for 'zrangebyscore'");
-        return;
-    }
-
+    if (cmd->count < 4) { send_error(fd, "wrong number of arguments for 'zrangebyscore'"); return; }
     ZSet *zset = store_get_zset(store, cmd->elements[1].str);
-
-    if (!zset) {
-        send_array_header(fd, 0);
-        return;
-    }
-
+    if (!zset) { send_array_header(fd, 0); return; }
     double min = atof(cmd->elements[2].str);
     double max = atof(cmd->elements[3].str);
-
-    /* Count matching members first so we can send the array header */
     int count = 0;
     for (int i = 0; i < zset->len; i++) {
-        if (zset->entries[i].score >= min && zset->entries[i].score <= max) {
-            count++;
-        }
+        if (zset->entries[i].score >= min && zset->entries[i].score <= max) count++;
     }
-
     send_array_header(fd, count);
-
     for (int i = 0; i < zset->len; i++) {
         if (zset->entries[i].score >= min && zset->entries[i].score <= max) {
             send_bulk(fd, zset->entries[i].member);
@@ -621,7 +409,73 @@ static void cmd_zrangebyscore(int fd, RespValue *cmd, Store *store) {
     }
 }
 
-void command_dispatch(int fd, RespValue *cmd, Store *store) {
+static void cmd_config_get(int fd, RespValue *cmd, Config *cfg) {
+    if (cmd->count < 3) { send_error(fd, "wrong number of arguments for 'config get'"); return; }
+
+    const char *pattern = cmd->elements[2].str;
+    char val_buf[32];
+
+    /* Collect matching key-value pairs */
+    const char *keys[]   = { "port", "hz", "loglevel", "dir", "dbfilename" };
+    const char *values[5];
+    char port_str[16], hz_str[16];
+
+    snprintf(port_str, sizeof(port_str), "%d", cfg->port);
+    snprintf(hz_str,   sizeof(hz_str),   "%d", cfg->hz);
+
+    values[0] = port_str;
+    values[1] = hz_str;
+    values[2] = cfg->loglevel;
+    values[3] = cfg->dir;
+    values[4] = cfg->dbfilename;
+
+    int count = 0;
+    for (int i = 0; i < 5; i++) {
+        if (fnmatch(pattern, keys[i], 0) == 0) count++;
+    }
+
+    send_array_header(fd, count * 2);
+
+    for (int i = 0; i < 5; i++) {
+        if (fnmatch(pattern, keys[i], 0) == 0) {
+            send_bulk(fd, keys[i]);
+            send_bulk(fd, values[i]);
+        }
+    }
+
+    (void)val_buf;
+}
+
+static void cmd_keys(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 2) { send_error(fd, "wrong number of arguments for 'keys'"); return; }
+
+    const char *pattern = cmd->elements[1].str;
+
+    /* First pass — count matches */
+    int count = 0;
+    for (int i = 0; i < STORE_NUM_BUCKETS; i++) {
+        StoreEntry *entry = store->buckets[i];
+        while (entry) {
+            if (fnmatch(pattern, entry->key, 0) == 0) count++;
+            entry = entry->next;
+        }
+    }
+
+    send_array_header(fd, count);
+
+    /* Second pass — send matching keys */
+    for (int i = 0; i < STORE_NUM_BUCKETS; i++) {
+        StoreEntry *entry = store->buckets[i];
+        while (entry) {
+            if (fnmatch(pattern, entry->key, 0) == 0) {
+                send_bulk(fd, entry->key);
+            }
+            entry = entry->next;
+        }
+    }
+}
+
+void command_dispatch(int fd, RespValue *cmd, Store *store, Config *cfg) {
     if (!cmd || cmd->type != RESP_ARRAY || cmd->count < 1) {
         send_error(fd, "invalid command");
         return;
@@ -701,6 +555,19 @@ void command_dispatch(int fd, RespValue *cmd, Store *store) {
         cmd_zscore(fd, cmd, store);
     } else if (strcmp(name, "ZRANGEBYSCORE") == 0) {
         cmd_zrangebyscore(fd, cmd, store);
+    } else if (strcmp(name, "CONFIG") == 0) {
+        if (cmd->count >= 2) {
+            char sub[16];
+            snprintf(sub, sizeof(sub), "%s", cmd->elements[1].str);
+            str_toupper(sub);
+            if (strcmp(sub, "GET") == 0) {
+                cmd_config_get(fd, cmd, cfg);
+            } else {
+                send_error(fd, "unsupported CONFIG subcommand");
+            }
+        }
+    } else if (strcmp(name, "KEYS") == 0) {
+        cmd_keys(fd, cmd, store);
     } else {
         send_error(fd, "unknown command");
     }
