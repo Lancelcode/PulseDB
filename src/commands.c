@@ -179,6 +179,8 @@ static void cmd_type(int fd, RespValue *cmd, Store *store) {
         send_simple(fd, "hash");
     } else if (t == STORE_TYPE_ZSET) {
         send_simple(fd, "zset");
+    } else if (t == STORE_TYPE_STREAM) {
+        send_simple(fd, "stream");
     } else {
         send_simple(fd, "none");
     }
@@ -412,10 +414,7 @@ static void cmd_zrangebyscore(int fd, RespValue *cmd, Store *store) {
 static void cmd_config_get(int fd, RespValue *cmd, Config *cfg) {
     if (cmd->count < 3) { send_error(fd, "wrong number of arguments for 'config get'"); return; }
 
-    const char *pattern = cmd->elements[2].str;
-    char val_buf[32];
-
-    /* Collect matching key-value pairs */
+    const char *pattern  = cmd->elements[2].str;
     const char *keys[]   = { "port", "hz", "loglevel", "dir", "dbfilename" };
     const char *values[5];
     char port_str[16], hz_str[16];
@@ -442,17 +441,14 @@ static void cmd_config_get(int fd, RespValue *cmd, Config *cfg) {
             send_bulk(fd, values[i]);
         }
     }
-
-    (void)val_buf;
 }
 
 static void cmd_keys(int fd, RespValue *cmd, Store *store) {
     if (cmd->count < 2) { send_error(fd, "wrong number of arguments for 'keys'"); return; }
 
     const char *pattern = cmd->elements[1].str;
-
-    /* First pass — count matches */
     int count = 0;
+
     for (int i = 0; i < STORE_NUM_BUCKETS; i++) {
         StoreEntry *entry = store->buckets[i];
         while (entry) {
@@ -463,27 +459,23 @@ static void cmd_keys(int fd, RespValue *cmd, Store *store) {
 
     send_array_header(fd, count);
 
-    /* Second pass — send matching keys */
     for (int i = 0; i < STORE_NUM_BUCKETS; i++) {
         StoreEntry *entry = store->buckets[i];
         while (entry) {
-            if (fnmatch(pattern, entry->key, 0) == 0) {
-                send_bulk(fd, entry->key);
-            }
+            if (fnmatch(pattern, entry->key, 0) == 0) send_bulk(fd, entry->key);
             entry = entry->next;
         }
     }
 }
+
 static void cmd_xadd(int fd, RespValue *cmd, Store *store) {
-    /* XADD key id field value [field value ...] */
     if (cmd->count < 5 || (cmd->count % 2) == 0) {
         send_error(fd, "wrong number of arguments for 'xadd'");
         return;
     }
 
-    const char *key = cmd->elements[1].str;
-    const char *id  = cmd->elements[2].str;
-
+    const char *key      = cmd->elements[1].str;
+    const char *id       = cmd->elements[2].str;
     int num_fields       = (cmd->count - 3) / 2;
     const char **fields  = malloc(num_fields * sizeof(char *));
     const char **values  = malloc(num_fields * sizeof(char *));
@@ -507,7 +499,6 @@ static void cmd_xadd(int fd, RespValue *cmd, Store *store) {
 }
 
 static void send_stream_entry(int fd, StreamEntry *entry) {
-    /* Each entry is a 2-element array: [id, [field, value, ...]] */
     char id_buf[64];
     snprintf(id_buf, sizeof(id_buf), "%llu-%llu",
              (unsigned long long)entry->ms,
@@ -516,14 +507,12 @@ static void send_stream_entry(int fd, StreamEntry *entry) {
     send_array_header(fd, 2);
     send_bulk(fd, id_buf);
 
-    /* Count fields */
     int count = 0;
     StreamField *f = entry->fields;
     while (f) { count++; f = f->next; }
 
     send_array_header(fd, count * 2);
 
-    /* Fields are stored in reverse order — send them as-is for simplicity */
     f = entry->fields;
     while (f) {
         send_bulk(fd, f->field);
@@ -533,10 +522,7 @@ static void send_stream_entry(int fd, StreamEntry *entry) {
 }
 
 static void cmd_xrange(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 4) {
-        send_error(fd, "wrong number of arguments for 'xrange'");
-        return;
-    }
+    if (cmd->count < 4) { send_error(fd, "wrong number of arguments for 'xrange'"); return; }
 
     Stream *stream = store_get_stream(store, cmd->elements[1].str);
     if (!stream) { send_array_header(fd, 0); return; }
@@ -544,8 +530,8 @@ static void cmd_xrange(int fd, RespValue *cmd, Store *store) {
     const char *start_str = cmd->elements[2].str;
     const char *end_str   = cmd->elements[3].str;
 
-    uint64_t start_ms  = 0, start_seq = 0;
-    uint64_t end_ms    = UINT64_MAX, end_seq = UINT64_MAX;
+    uint64_t start_ms = 0, start_seq = 0;
+    uint64_t end_ms   = UINT64_MAX, end_seq = UINT64_MAX;
 
     if (strcmp(start_str, "-") != 0) {
         char buf[128];
@@ -563,7 +549,6 @@ static void cmd_xrange(int fd, RespValue *cmd, Store *store) {
         else { end_ms = strtoull(buf, NULL, 10); end_seq = UINT64_MAX; }
     }
 
-    /* Count matching entries */
     int count = 0;
     StreamEntry *entry = stream->head;
     while (entry) {
@@ -587,14 +572,10 @@ static void cmd_xrange(int fd, RespValue *cmd, Store *store) {
 }
 
 static void cmd_xread(int fd, RespValue *cmd, Store *store) {
-    /* XREAD COUNT n STREAMS key1 key2 id1 id2 */
-    if (cmd->count < 4) {
-        send_error(fd, "wrong number of arguments for 'xread'");
-        return;
-    }
+    if (cmd->count < 4) { send_error(fd, "wrong number of arguments for 'xread'"); return; }
 
     int arg_idx = 1;
-    int count   = 0; /* 0 = no limit */
+    int count   = 0;
 
     char opt[16];
     snprintf(opt, sizeof(opt), "%s", cmd->elements[arg_idx].str);
@@ -605,13 +586,9 @@ static void cmd_xread(int fd, RespValue *cmd, Store *store) {
         arg_idx += 2;
     }
 
-    /* Expect STREAMS keyword */
     snprintf(opt, sizeof(opt), "%s", cmd->elements[arg_idx].str);
     str_toupper(opt);
-    if (strcmp(opt, "STREAMS") != 0) {
-        send_error(fd, "syntax error");
-        return;
-    }
+    if (strcmp(opt, "STREAMS") != 0) { send_error(fd, "syntax error"); return; }
     arg_idx++;
 
     int num_keys = (cmd->count - arg_idx) / 2;
@@ -634,7 +611,6 @@ static void cmd_xread(int fd, RespValue *cmd, Store *store) {
         }
 
         Stream *stream = store_get_stream(store, key);
-
         send_array_header(fd, 2);
         send_bulk(fd, key);
 
@@ -650,7 +626,7 @@ static void cmd_xread(int fd, RespValue *cmd, Store *store) {
         if (count > 0 && matched > count) matched = count;
         send_array_header(fd, matched);
 
-        int sent  = 0;
+        int sent = 0;
         entry = stream->head;
         while (entry && (count == 0 || sent < count)) {
             if (entry->ms > start_ms || (entry->ms == start_ms && entry->seq >= start_seq)) {
@@ -663,29 +639,20 @@ static void cmd_xread(int fd, RespValue *cmd, Store *store) {
 }
 
 static void cmd_multi(int fd, Txn *txn) {
-    if (txn->active) {
-        send_error(fd, "MULTI calls can not be nested");
-        return;
-    }
+    if (txn->active) { send_error(fd, "MULTI calls can not be nested"); return; }
     txn->active = 1;
     send_simple(fd, "OK");
 }
 
 static void cmd_discard(int fd, Txn *txn) {
-    if (!txn->active) {
-        send_error(fd, "DISCARD without MULTI");
-        return;
-    }
+    if (!txn->active) { send_error(fd, "DISCARD without MULTI"); return; }
     txn_reset(txn);
     send_simple(fd, "OK");
 }
 
 static void cmd_exec(int fd, RespValue *cmd, Store *store, Config *cfg, Txn *txn) {
     (void)cmd;
-    if (!txn->active) {
-        send_error(fd, "EXEC without MULTI");
-        return;
-    }
+    if (!txn->active) { send_error(fd, "EXEC without MULTI"); return; }
 
     if (txn->error) {
         txn_reset(txn);
@@ -695,7 +662,6 @@ static void cmd_exec(int fd, RespValue *cmd, Store *store, Config *cfg, Txn *txn
 
     send_array_header(fd, txn->count);
 
-    /* Execute each queued command and send its response */
     for (int i = 0; i < txn->count; i++) {
         command_dispatch(fd, txn->cmds[i], store, cfg, NULL);
     }
@@ -704,7 +670,6 @@ static void cmd_exec(int fd, RespValue *cmd, Store *store, Config *cfg, Txn *txn
 }
 
 static void cmd_geoadd(int fd, RespValue *cmd, Store *store) {
-    /* GEOADD key lng lat member [lng lat member ...] */
     if (cmd->count < 5 || ((cmd->count - 2) % 3) != 0) {
         send_error(fd, "wrong number of arguments for 'geoadd'");
         return;
@@ -714,8 +679,8 @@ static void cmd_geoadd(int fd, RespValue *cmd, Store *store) {
     int added       = 0;
 
     for (int i = 2; i < cmd->count - 2; i += 3) {
-        double lng    = atof(cmd->elements[i].str);
-        double lat    = atof(cmd->elements[i + 1].str);
+        double lng         = atof(cmd->elements[i].str);
+        double lat         = atof(cmd->elements[i + 1].str);
         const char *member = cmd->elements[i + 2].str;
 
         if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
@@ -725,10 +690,7 @@ static void cmd_geoadd(int fd, RespValue *cmd, Store *store) {
 
         double score = (double)geo_encode(lat, lng);
         int result   = store_zadd(store, key, score, member);
-        if (result < 0) {
-            send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value");
-            return;
-        }
+        if (result < 0) { send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value"); return; }
         added += result;
     }
 
@@ -736,11 +698,7 @@ static void cmd_geoadd(int fd, RespValue *cmd, Store *store) {
 }
 
 static void cmd_geodist(int fd, RespValue *cmd, Store *store) {
-    /* GEODIST key member1 member2 [unit] */
-    if (cmd->count < 4) {
-        send_error(fd, "wrong number of arguments for 'geodist'");
-        return;
-    }
+    if (cmd->count < 4) { send_error(fd, "wrong number of arguments for 'geodist'"); return; }
 
     const char *key     = cmd->elements[1].str;
     const char *member1 = cmd->elements[2].str;
@@ -751,23 +709,20 @@ static void cmd_geodist(int fd, RespValue *cmd, Store *store) {
     double score1 = store_zscore(store, key, member1, &found1);
     double score2 = store_zscore(store, key, member2, &found2);
 
-    if (!found1 || !found2) {
-        send_null(fd);
-        return;
-    }
+    if (!found1 || !found2) { send_null(fd); return; }
 
     double lat1, lng1, lat2, lng2;
     geo_decode((uint64_t)score1, &lat1, &lng1);
     geo_decode((uint64_t)score2, &lat2, &lng2);
 
-    double dist_m = geo_distance_m(lat1, lng1, lat2, lng2);
-    double result = dist_m;
+    double dist_m  = geo_distance_m(lat1, lng1, lat2, lng2);
+    double result  = dist_m;
 
     char unit_upper[8];
     snprintf(unit_upper, sizeof(unit_upper), "%s", unit);
     str_toupper(unit_upper);
 
-    if (strcmp(unit_upper, "KM") == 0) result = dist_m / 1000.0;
+    if      (strcmp(unit_upper, "KM") == 0) result = dist_m / 1000.0;
     else if (strcmp(unit_upper, "MI") == 0) result = dist_m / 1609.344;
     else if (strcmp(unit_upper, "FT") == 0) result = dist_m * 3.28084;
 
@@ -777,11 +732,7 @@ static void cmd_geodist(int fd, RespValue *cmd, Store *store) {
 }
 
 static void cmd_geopos(int fd, RespValue *cmd, Store *store) {
-    /* GEOPOS key member [member ...] */
-    if (cmd->count < 3) {
-        send_error(fd, "wrong number of arguments for 'geopos'");
-        return;
-    }
+    if (cmd->count < 3) { send_error(fd, "wrong number of arguments for 'geopos'"); return; }
 
     int num_members = cmd->count - 2;
     send_array_header(fd, num_members);
@@ -795,9 +746,7 @@ static void cmd_geopos(int fd, RespValue *cmd, Store *store) {
         } else {
             double lat, lng;
             geo_decode((uint64_t)score, &lat, &lng);
-
             send_array_header(fd, 2);
-
             char lng_buf[32], lat_buf[32];
             snprintf(lng_buf, sizeof(lng_buf), "%.17g", lng);
             snprintf(lat_buf, sizeof(lat_buf), "%.17g", lat);
@@ -817,7 +766,6 @@ void command_dispatch(int fd, RespValue *cmd, Store *store, Config *cfg, Txn *tx
     snprintf(name, sizeof(name), "%s", cmd->elements[0].str);
     str_toupper(name);
 
-    /* Handle transaction control commands first */
     if (strcmp(name, "MULTI") == 0) {
         cmd_multi(fd, txn);
         return;
@@ -829,17 +777,14 @@ void command_dispatch(int fd, RespValue *cmd, Store *store, Config *cfg, Txn *tx
         return;
     }
 
-    /* If inside a MULTI block, queue the command instead of executing */
     if (txn && txn->active) {
-        /* Make a copy of the command to queue */
-        RespValue *copy = malloc(sizeof(RespValue));
-        *copy = *cmd;
-        copy->elements = malloc(cmd->count * sizeof(RespValue));
+        RespValue *copy    = malloc(sizeof(RespValue));
+        *copy              = *cmd;
+        copy->elements     = malloc(cmd->count * sizeof(RespValue));
         memcpy(copy->elements, cmd->elements, cmd->count * sizeof(RespValue));
         for (int i = 0; i < cmd->count; i++) {
             if (cmd->elements[i].str) copy->elements[i].str = strdup(cmd->elements[i].str);
         }
-
         if (txn_queue(txn, copy) < 0) {
             send_error(fd, "ERR transaction queue full");
         } else {
@@ -866,8 +811,6 @@ void command_dispatch(int fd, RespValue *cmd, Store *store, Config *cfg, Txn *tx
         cmd_exists(fd, cmd, store);
     } else if (strcmp(name, "TYPE") == 0) {
         cmd_type(fd, cmd, store);
-    } else if (t == STORE_TYPE_STREAM) {
-        send_simple(fd, "stream");
     } else if (strcmp(name, "INCR") == 0) {
         cmd_incrby(fd, cmd, store, 1, 1);
     } else if (strcmp(name, "DECR") == 0) {
@@ -939,7 +882,7 @@ void command_dispatch(int fd, RespValue *cmd, Store *store, Config *cfg, Txn *tx
         cmd_xrange(fd, cmd, store);
     } else if (strcmp(name, "XREAD") == 0) {
         cmd_xread(fd, cmd, store);
-        } else if (strcmp(name, "GEOADD") == 0) {
+    } else if (strcmp(name, "GEOADD") == 0) {
         cmd_geoadd(fd, cmd, store);
     } else if (strcmp(name, "GEODIST") == 0) {
         cmd_geodist(fd, cmd, store);
