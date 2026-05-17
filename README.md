@@ -17,61 +17,28 @@ make
 
 ## Testing
 
-Start the server, then in a second terminal:
-
 ```bash
-# PING
-redis-cli ping
-# Expected: PONG
-
-# SET and GET
-redis-cli set name "pulsedb"
-redis-cli get name
-# Expected: pulsedb
-
-# Lists
-redis-cli rpush mylist a b c
-redis-cli lrange mylist 0 -1
-# Expected: a, b, c
-
-# HSET — single field
-redis-cli hset user name "alice"
-# Expected: 1
-
-# HSET — multiple fields
-redis-cli hset user age "30" city "london"
-# Expected: 2
-
-# HGET
-redis-cli hget user name
-# Expected: alice
-
-# HGET missing field
-redis-cli hget user missing
-# Expected: (nil)
-
-# HGETALL
-redis-cli hgetall user
-# Expected: name, alice, age, 30, city, london
-
-# HMGET
-redis-cli hmget user name age missing
-# Expected: alice, 30, (nil)
-
-# HLEN
-redis-cli hlen user
+# Sorted Sets
+redis-cli zadd scores 1.0 alice 2.0 bob 3.0 charlie
 # Expected: 3
 
-# HDEL
-redis-cli hdel user city
+redis-cli zrange scores 0 -1
+# Expected: alice, bob, charlie
+
+redis-cli zrange scores 0 -1 WITHSCORES
+# Expected: alice 1, bob 2, charlie 3
+
+redis-cli zrank scores bob
 # Expected: 1
 
-redis-cli hlen user
-# Expected: 2
+redis-cli zcard scores
+# Expected: 3
 
-# TYPE
-redis-cli type user
-# Expected: hash
+redis-cli zscore scores alice
+# Expected: 1
+
+redis-cli zrangebyscore scores 1 2
+# Expected: alice, bob
 ```
 
 ## Features
@@ -85,7 +52,8 @@ redis-cli type user
 - [x] INCR / DECR
 - [x] Lists (LPUSH, RPUSH, LPOP, RPOP, LRANGE, LLEN, BLPOP)
 - [x] Hashes (HSET, HGET, HGETALL, HMGET, HDEL, HLEN)
-- [ ] Sorted Sets
+- [x] Sorted Sets (ZADD, ZRANGE, ZRANK, ZCARD, ZSCORE, ZRANGEBYSCORE)
+- [ ] CONFIG GET, KEYS
 - [ ] RDB persistence
 - [ ] Streams
 - [ ] Replication
