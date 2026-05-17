@@ -30,6 +30,10 @@ int64_t     store_get_expiry(Store *store, const char *key);
 int         store_del(Store *store, const char *key);
 int         store_exists(Store *store, const char *key);
 StoreType   store_type(Store *store, const char *key);
+
+/* Returns the new value after increment, or LLONG_MIN on error */
+int64_t     store_incrby(Store *store, const char *key, int64_t delta);
+
 void        store_destroy(Store *store);
 
 int64_t now_ms(void);
