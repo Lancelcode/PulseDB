@@ -23,10 +23,9 @@ typedef struct {
 typedef struct HashField {
     char             *field;
     char             *value;
-    struct HashField *next; /* chaining within hash bucket */
+    struct HashField *next;
 } HashField;
 
-/* A hash is its own small hash table */
 #define HASH_NUM_BUCKETS 64
 
 typedef struct {
@@ -34,10 +33,23 @@ typedef struct {
     int        len;
 } Hash;
 
+/* A single member in a sorted set — stored as a sorted array */
+typedef struct {
+    char   *member;
+    double  score;
+} ZSetEntry;
+
+typedef struct {
+    ZSetEntry *entries; /* heap-allocated array, kept sorted by score */
+    int        len;
+    int        cap;
+} ZSet;
+
 typedef enum {
     STORE_TYPE_STRING,
     STORE_TYPE_LIST,
-    STORE_TYPE_HASH
+    STORE_TYPE_HASH,
+    STORE_TYPE_ZSET
 } StoreType;
 
 typedef struct StoreEntry {
@@ -49,6 +61,7 @@ typedef struct StoreEntry {
     char  *value; /* STORE_TYPE_STRING */
     List  *list;  /* STORE_TYPE_LIST   */
     Hash  *hash;  /* STORE_TYPE_HASH   */
+    ZSet  *zset;  /* STORE_TYPE_ZSET   */
 } StoreEntry;
 
 typedef struct {
@@ -79,6 +92,13 @@ char       *store_hget(Store *store, const char *key, const char *field);
 int         store_hdel(Store *store, const char *key, const char *field);
 int         store_hlen(Store *store, const char *key);
 Hash       *store_get_hash(Store *store, const char *key);
+
+/* Sorted set operations */
+int         store_zadd(Store *store, const char *key, double score, const char *member);
+double      store_zscore(Store *store, const char *key, const char *member, int *found);
+int         store_zrank(Store *store, const char *key, const char *member);
+int         store_zcard(Store *store, const char *key);
+ZSet       *store_get_zset(Store *store, const char *key);
 
 void        store_destroy(Store *store);
 
