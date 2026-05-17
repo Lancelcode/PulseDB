@@ -6,6 +6,7 @@
 #include <limits.h>
 #include <sys/select.h>
 #include "commands.h"
+#include "store.h"
 
 void send_simple(int fd, const char *msg) {
     char buf[256];
@@ -181,6 +182,8 @@ static void cmd_type(int fd, RespValue *cmd, Store *store) {
         send_simple(fd, "string");
     } else if (t == STORE_TYPE_LIST) {
         send_simple(fd, "list");
+    } else if (t == STORE_TYPE_HASH) {
+        send_simple(fd, "hash");
     } else {
         send_simple(fd, "none");
     }
@@ -377,6 +380,110 @@ static void cmd_blpop(int fd, RespValue *cmd, Store *store) {
     }
 }
 
+static void cmd_hset(int fd, RespValue *cmd, Store *store) {
+    /* HSET key field value [field value ...] */
+    if (cmd->count < 4 || (cmd->count % 2) != 0) {
+        send_error(fd, "wrong number of arguments for 'hset'");
+        return;
+    }
+
+    const char *key = cmd->elements[1].str;
+    int added       = 0;
+
+    for (int i = 2; i < cmd->count - 1; i += 2) {
+        int result = store_hset(store, key, cmd->elements[i].str, cmd->elements[i + 1].str);
+        if (result < 0) {
+            send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value");
+            return;
+        }
+        added += result; /* store_hset returns 1 for new field, 0 for update */
+    }
+
+    send_integer(fd, added);
+}
+
+static void cmd_hget(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 3) {
+        send_error(fd, "wrong number of arguments for 'hget'");
+        return;
+    }
+
+    char *value = store_hget(store, cmd->elements[1].str, cmd->elements[2].str);
+    if (value) {
+        send_bulk(fd, value);
+    } else {
+        send_null(fd);
+    }
+}
+
+static void cmd_hgetall(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 2) {
+        send_error(fd, "wrong number of arguments for 'hgetall'");
+        return;
+    }
+
+    Hash *hash = store_get_hash(store, cmd->elements[1].str);
+
+    if (!hash) {
+        send_array_header(fd, 0);
+        return;
+    }
+
+    /* Send 2 * len elements: field, value, field, value... */
+    send_array_header(fd, hash->len * 2);
+
+    for (int i = 0; i < HASH_NUM_BUCKETS; i++) {
+        HashField *hf = hash->buckets[i];
+        while (hf) {
+            send_bulk(fd, hf->field);
+            send_bulk(fd, hf->value);
+            hf = hf->next;
+        }
+    }
+}
+
+static void cmd_hmget(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 3) {
+        send_error(fd, "wrong number of arguments for 'hmget'");
+        return;
+    }
+
+    int num_fields = cmd->count - 2;
+    send_array_header(fd, num_fields);
+
+    for (int i = 2; i < cmd->count; i++) {
+        char *value = store_hget(store, cmd->elements[1].str, cmd->elements[i].str);
+        if (value) {
+            send_bulk(fd, value);
+        } else {
+            send_null(fd);
+        }
+    }
+}
+
+static void cmd_hdel(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 3) {
+        send_error(fd, "wrong number of arguments for 'hdel'");
+        return;
+    }
+
+    int deleted = 0;
+    for (int i = 2; i < cmd->count; i++) {
+        deleted += store_hdel(store, cmd->elements[1].str, cmd->elements[i].str);
+    }
+
+    send_integer(fd, deleted);
+}
+
+static void cmd_hlen(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 2) {
+        send_error(fd, "wrong number of arguments for 'hlen'");
+        return;
+    }
+
+    send_integer(fd, store_hlen(store, cmd->elements[1].str));
+}
+
 void command_dispatch(int fd, RespValue *cmd, Store *store) {
     if (!cmd || cmd->type != RESP_ARRAY || cmd->count < 1) {
         send_error(fd, "invalid command");
@@ -433,6 +540,18 @@ void command_dispatch(int fd, RespValue *cmd, Store *store) {
         cmd_lrange(fd, cmd, store);
     } else if (strcmp(name, "BLPOP") == 0) {
         cmd_blpop(fd, cmd, store);
+    } else if (strcmp(name, "HSET") == 0) {
+        cmd_hset(fd, cmd, store);
+    } else if (strcmp(name, "HGET") == 0) {
+        cmd_hget(fd, cmd, store);
+    } else if (strcmp(name, "HGETALL") == 0) {
+        cmd_hgetall(fd, cmd, store);
+    } else if (strcmp(name, "HMGET") == 0) {
+        cmd_hmget(fd, cmd, store);
+    } else if (strcmp(name, "HDEL") == 0) {
+        cmd_hdel(fd, cmd, store);
+    } else if (strcmp(name, "HLEN") == 0) {
+        cmd_hlen(fd, cmd, store);
     } else {
         send_error(fd, "unknown command");
     }
