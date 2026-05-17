@@ -15,9 +15,25 @@ make
 ./pulsedb
 ```
 
+## Testing the connection
+
+In a second terminal, you can test the server is accepting connections:
+
+```bash
+redis-cli ping
+```
+
+Or with netcat:
+
+```bash
+echo "hello" | nc localhost 6379
+```
+
+You should see `client connected` printed in the server terminal.
+
 ## Features
 
-- [ ] TCP server
+- [x] TCP server
 - [ ] RESP protocol parser
 - [ ] PING / ECHO
 - [ ] SET / GET
