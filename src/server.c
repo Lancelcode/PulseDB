@@ -48,6 +48,21 @@ static char *read_client(int client_fd, ssize_t *out_len) {
             buf = realloc(buf, capacity);
             if (!buf) return NULL;
         }
+
+        /* If we have a complete RESP message, stop reading */
+        if (total > 0 && buf[0] == '*') {
+            buf[total] = '\0';
+            /* Count expected elements from the array header */
+            int expected = atoi(buf + 1);
+            if (expected <= 0) break;
+            /* Check if we have enough newlines for a complete command.
+               Each element needs 2 lines (header + data), plus 1 for array header */
+            int newlines = 0;
+            for (size_t i = 0; i < total; i++) {
+                if (buf[i] == '\n') newlines++;
+            }
+            if (newlines >= expected * 2 + 1) break;
+        }
     }
 
     buf[total] = '\0';
