@@ -30,8 +30,6 @@ redis-cli echo "hello world"
 
 # SET and GET
 redis-cli set name "pulsedb"
-# Expected: OK
-
 redis-cli get name
 # Expected: pulsedb
 
@@ -40,38 +38,43 @@ redis-cli set temp "bye" EX 5
 redis-cli ttl temp
 # Expected: 5 (or less)
 
-# DEL single key
-redis-cli del name
-# Expected: 1
-
-redis-cli get name
-# Expected: (nil)
-
-# DEL multiple keys
+# DEL and EXISTS
 redis-cli set a 1
 redis-cli set b 2
 redis-cli del a b missing
 # Expected: 2
 
-# EXISTS
-redis-cli set foo "bar"
-redis-cli exists foo
-# Expected: 1
-
-redis-cli exists missing
+redis-cli exists a
 # Expected: 0
-
-# EXISTS multiple keys
-redis-cli exists foo foo missing
-# Expected: 2
 
 # TYPE
 redis-cli set mykey "hello"
 redis-cli type mykey
 # Expected: string
 
-redis-cli type missing
-# Expected: none
+# INCR — creates key if missing, starting from 0
+redis-cli incr counter
+# Expected: 1
+
+redis-cli incr counter
+# Expected: 2
+
+# DECR
+redis-cli decr counter
+# Expected: 1
+
+# INCRBY
+redis-cli incrby counter 10
+# Expected: 11
+
+# DECRBY
+redis-cli decrby counter 5
+# Expected: 6
+
+# Error on non-integer value
+redis-cli set foo "bar"
+redis-cli incr foo
+# Expected: (error) ERR value is not an integer or out of range
 ```
 
 ## Features
@@ -82,7 +85,7 @@ redis-cli type missing
 - [x] SET / GET
 - [x] Expiry (EX, PX, TTL, PTTL)
 - [x] DEL, EXISTS, TYPE
-- [ ] INCR / DECR
+- [x] INCR / DECR
 - [ ] Lists
 - [ ] Hashes
 - [ ] Sorted Sets
