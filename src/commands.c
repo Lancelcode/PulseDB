@@ -62,11 +62,10 @@ static void cmd_set(int fd, RespValue *cmd, Store *store) {
         return;
     }
 
-    const char *key   = cmd->elements[1].str;
-    const char *value = cmd->elements[2].str;
+    const char *key        = cmd->elements[1].str;
+    const char *value      = cmd->elements[2].str;
     int64_t     expires_at = 0;
 
-    /* Parse optional EX and PX arguments */
     for (int i = 3; i < cmd->count - 1; i++) {
         char opt[8];
         snprintf(opt, sizeof(opt), "%s", cmd->elements[i].str);
@@ -109,9 +108,9 @@ static void cmd_ttl(int fd, RespValue *cmd, Store *store) {
     int64_t expiry = store_get_expiry(store, cmd->elements[1].str);
 
     if (expiry == -2) {
-        send_integer(fd, -2); /* key does not exist */
+        send_integer(fd, -2);
     } else if (expiry == -1) {
-        send_integer(fd, -1); /* key exists but no expiry */
+        send_integer(fd, -1);
     } else {
         long secs = (long)((expiry - now_ms()) / 1000);
         send_integer(fd, secs < 0 ? -2 : secs);
@@ -127,12 +126,53 @@ static void cmd_pttl(int fd, RespValue *cmd, Store *store) {
     int64_t expiry = store_get_expiry(store, cmd->elements[1].str);
 
     if (expiry == -2) {
-        send_integer(fd, -2); /* key does not exist */
+        send_integer(fd, -2);
     } else if (expiry == -1) {
-        send_integer(fd, -1); /* key exists but no expiry */
+        send_integer(fd, -1);
     } else {
         long ms = (long)(expiry - now_ms());
         send_integer(fd, ms < 0 ? -2 : ms);
+    }
+}
+
+static void cmd_del(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 2) {
+        send_error(fd, "wrong number of arguments for 'del'");
+        return;
+    }
+
+    int deleted = 0;
+    for (int i = 1; i < cmd->count; i++) {
+        deleted += store_del(store, cmd->elements[i].str);
+    }
+    send_integer(fd, deleted);
+}
+
+static void cmd_exists(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 2) {
+        send_error(fd, "wrong number of arguments for 'exists'");
+        return;
+    }
+
+    int found = 0;
+    for (int i = 1; i < cmd->count; i++) {
+        found += store_exists(store, cmd->elements[i].str);
+    }
+    send_integer(fd, found);
+}
+
+static void cmd_type(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 2) {
+        send_error(fd, "wrong number of arguments for 'type'");
+        return;
+    }
+
+    StoreType t = store_type(store, cmd->elements[1].str);
+
+    if (t == STORE_TYPE_STRING) {
+        send_simple(fd, "string");
+    } else {
+        send_simple(fd, "none");
     }
 }
 
@@ -158,6 +198,12 @@ void command_dispatch(int fd, RespValue *cmd, Store *store) {
         cmd_ttl(fd, cmd, store);
     } else if (strcmp(name, "PTTL") == 0) {
         cmd_pttl(fd, cmd, store);
+    } else if (strcmp(name, "DEL") == 0) {
+        cmd_del(fd, cmd, store);
+    } else if (strcmp(name, "EXISTS") == 0) {
+        cmd_exists(fd, cmd, store);
+    } else if (strcmp(name, "TYPE") == 0) {
+        cmd_type(fd, cmd, store);
     } else {
         send_error(fd, "unknown command");
     }

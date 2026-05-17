@@ -47,6 +47,7 @@ void store_set_with_expiry(Store *store, const char *key, const char *value, int
             free(entry->value);
             entry->value      = strdup(value);
             entry->expires_at = expires_at_ms;
+            entry->type       = STORE_TYPE_STRING;
             return;
         }
         entry = entry->next;
@@ -56,6 +57,7 @@ void store_set_with_expiry(Store *store, const char *key, const char *value, int
     new_entry->key         = strdup(key);
     new_entry->value       = strdup(value);
     new_entry->expires_at  = expires_at_ms;
+    new_entry->type        = STORE_TYPE_STRING;
     new_entry->next        = store->buckets[slot];
     store->buckets[slot]   = new_entry;
 }
@@ -66,9 +68,7 @@ char *store_get(Store *store, const char *key) {
 
     while (entry) {
         if (strcmp(entry->key, key) == 0) {
-            if (entry_is_expired(entry)) {
-                return NULL; /* treat expired keys as missing */
-            }
+            if (entry_is_expired(entry)) return NULL;
             return entry->value;
         }
         entry = entry->next;
@@ -83,14 +83,62 @@ int64_t store_get_expiry(Store *store, const char *key) {
 
     while (entry) {
         if (strcmp(entry->key, key) == 0) {
-            if (entry_is_expired(entry)) return -2; /* key expired */
-            if (entry->expires_at == 0)  return -1; /* no expiry set */
+            if (entry_is_expired(entry)) return -2;
+            if (entry->expires_at == 0)  return -1;
             return entry->expires_at;
         }
         entry = entry->next;
     }
 
-    return -2; /* key not found */
+    return -2;
+}
+
+int store_del(Store *store, const char *key) {
+    unsigned int  slot  = hash(key);
+    StoreEntry  **curr  = &store->buckets[slot];
+
+    while (*curr) {
+        if (strcmp((*curr)->key, key) == 0) {
+            StoreEntry *to_free = *curr;
+            *curr = to_free->next; /* unlink from list */
+            free(to_free->key);
+            free(to_free->value);
+            free(to_free);
+            return 1; /* deleted */
+        }
+        curr = &(*curr)->next;
+    }
+
+    return 0; /* key not found */
+}
+
+int store_exists(Store *store, const char *key) {
+    unsigned int slot  = hash(key);
+    StoreEntry  *entry = store->buckets[slot];
+
+    while (entry) {
+        if (strcmp(entry->key, key) == 0) {
+            return !entry_is_expired(entry);
+        }
+        entry = entry->next;
+    }
+
+    return 0;
+}
+
+StoreType store_type(Store *store, const char *key) {
+    unsigned int slot  = hash(key);
+    StoreEntry  *entry = store->buckets[slot];
+
+    while (entry) {
+        if (strcmp(entry->key, key) == 0) {
+            if (entry_is_expired(entry)) return -1;
+            return entry->type;
+        }
+        entry = entry->next;
+    }
+
+    return -1; /* key not found */
 }
 
 void store_destroy(Store *store) {
