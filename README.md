@@ -35,9 +35,28 @@ redis-cli set name "pulsedb"
 redis-cli get name
 # Expected: pulsedb
 
-# GET a missing key
-redis-cli get missing
+# SET with expiry in seconds
+redis-cli set temp "bye" EX 5
+# Expected: OK
+
+redis-cli ttl temp
+# Expected: 5 (or less)
+
+redis-cli pttl temp
+# Expected: ~5000 (or less)
+
+# Wait 5 seconds, then:
+redis-cli get temp
 # Expected: (nil)
+
+# Key with no expiry
+redis-cli set permanent "here"
+redis-cli ttl permanent
+# Expected: -1
+
+# Missing key
+redis-cli ttl missing
+# Expected: -2
 ```
 
 ## Features
@@ -46,7 +65,7 @@ redis-cli get missing
 - [x] RESP protocol parser
 - [x] PING / ECHO
 - [x] SET / GET
-- [ ] Expiry (EX, PX, TTL, PTTL)
+- [x] Expiry (EX, PX, TTL, PTTL)
 - [ ] DEL, EXISTS, TYPE
 - [ ] INCR / DECR
 - [ ] Lists
