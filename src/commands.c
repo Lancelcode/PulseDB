@@ -36,9 +36,24 @@ void send_integer(int fd, long val) {
     write(fd, buf, strlen(buf));
 }
 
-/* Convert a string to uppercase in place */
 static void str_toupper(char *s) {
     for (; *s; s++) *s = toupper((unsigned char)*s);
+}
+
+static void cmd_ping(int fd, RespValue *cmd) {
+    if (cmd->count == 1) {
+        send_simple(fd, "PONG");
+    } else {
+        send_bulk(fd, cmd->elements[1].str);
+    }
+}
+
+static void cmd_echo(int fd, RespValue *cmd) {
+    if (cmd->count < 2) {
+        send_error(fd, "wrong number of arguments for 'echo'");
+        return;
+    }
+    send_bulk(fd, cmd->elements[1].str);
 }
 
 void command_dispatch(int fd, RespValue *cmd) {
@@ -47,17 +62,14 @@ void command_dispatch(int fd, RespValue *cmd) {
         return;
     }
 
-    /* Commands are case-insensitive — normalise to uppercase */
     char name[64];
     snprintf(name, sizeof(name), "%s", cmd->elements[0].str);
     str_toupper(name);
 
     if (strcmp(name, "PING") == 0) {
-        if (cmd->count == 1) {
-            send_simple(fd, "PONG");
-        } else {
-            send_bulk(fd, cmd->elements[1].str);
-        }
+        cmd_ping(fd, cmd);
+    } else if (strcmp(name, "ECHO") == 0) {
+        cmd_echo(fd, cmd);
     } else {
         send_error(fd, "unknown command");
     }
