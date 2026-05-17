@@ -6,7 +6,6 @@
 
 #define STORE_NUM_BUCKETS 1024
 
-/* A node in a doubly linked list */
 typedef struct ListNode {
     char            *value;
     struct ListNode *prev;
@@ -19,7 +18,6 @@ typedef struct {
     int       len;
 } List;
 
-/* A single field-value pair in a hash */
 typedef struct HashField {
     char             *field;
     char             *value;
@@ -33,23 +31,46 @@ typedef struct {
     int        len;
 } Hash;
 
-/* A single member in a sorted set — stored as a sorted array */
 typedef struct {
     char   *member;
     double  score;
 } ZSetEntry;
 
 typedef struct {
-    ZSetEntry *entries; /* heap-allocated array, kept sorted by score */
+    ZSetEntry *entries;
     int        len;
     int        cap;
 } ZSet;
+
+/* A single field-value pair within a stream entry */
+typedef struct StreamField {
+    char              *field;
+    char              *value;
+    struct StreamField *next;
+} StreamField;
+
+/* A single entry in a stream, identified by ID "ms-seq" */
+typedef struct StreamEntry {
+    uint64_t           ms;      /* millisecond timestamp part of ID */
+    uint64_t           seq;     /* sequence number part of ID */
+    StreamField       *fields;  /* linked list of field-value pairs */
+    struct StreamEntry *next;
+} StreamEntry;
+
+typedef struct {
+    StreamEntry *head;
+    StreamEntry *tail;
+    int          len;
+    uint64_t     last_ms;  /* last inserted ID — for auto-sequencing */
+    uint64_t     last_seq;
+} Stream;
 
 typedef enum {
     STORE_TYPE_STRING,
     STORE_TYPE_LIST,
     STORE_TYPE_HASH,
-    STORE_TYPE_ZSET
+    STORE_TYPE_ZSET,
+    STORE_TYPE_STREAM
 } StoreType;
 
 typedef struct StoreEntry {
@@ -58,10 +79,11 @@ typedef struct StoreEntry {
     int64_t            expires_at;
     struct StoreEntry *next;
 
-    char  *value; /* STORE_TYPE_STRING */
-    List  *list;  /* STORE_TYPE_LIST   */
-    Hash  *hash;  /* STORE_TYPE_HASH   */
-    ZSet  *zset;  /* STORE_TYPE_ZSET   */
+    char   *value;
+    List   *list;
+    Hash   *hash;
+    ZSet   *zset;
+    Stream *stream;
 } StoreEntry;
 
 typedef struct {
@@ -78,7 +100,6 @@ int         store_exists(Store *store, const char *key);
 StoreType   store_type(Store *store, const char *key);
 int64_t     store_incrby(Store *store, const char *key, int64_t delta);
 
-/* List operations */
 int         store_lpush(Store *store, const char *key, const char *value);
 int         store_rpush(Store *store, const char *key, const char *value);
 char       *store_lpop(Store *store, const char *key);
@@ -86,19 +107,22 @@ char       *store_rpop(Store *store, const char *key);
 int         store_llen(Store *store, const char *key);
 List       *store_get_list(Store *store, const char *key);
 
-/* Hash operations */
 int         store_hset(Store *store, const char *key, const char *field, const char *value);
 char       *store_hget(Store *store, const char *key, const char *field);
 int         store_hdel(Store *store, const char *key, const char *field);
 int         store_hlen(Store *store, const char *key);
 Hash       *store_get_hash(Store *store, const char *key);
 
-/* Sorted set operations */
 int         store_zadd(Store *store, const char *key, double score, const char *member);
 double      store_zscore(Store *store, const char *key, const char *member, int *found);
 int         store_zrank(Store *store, const char *key, const char *member);
 int         store_zcard(Store *store, const char *key);
 ZSet       *store_get_zset(Store *store, const char *key);
+
+/* Stream operations — id_out receives the generated ID string (caller frees) */
+char       *store_xadd(Store *store, const char *key, const char *id,
+                        const char **fields, const char **values, int num_fields);
+Stream     *store_get_stream(Store *store, const char *key);
 
 void        store_destroy(Store *store);
 
