@@ -29,42 +29,49 @@ redis-cli set name "pulsedb"
 redis-cli get name
 # Expected: pulsedb
 
-# INCR / DECR
-redis-cli incr counter
-# Expected: 1
-redis-cli incrby counter 10
-# Expected: 11
-
-# LPUSH and RPUSH
+# Lists
 redis-cli rpush mylist a b c
-# Expected: 3
-
-# LRANGE — full list
 redis-cli lrange mylist 0 -1
 # Expected: a, b, c
 
-# LRANGE — last two elements
-redis-cli lrange mylist -2 -1
-# Expected: b, c
+# HSET — single field
+redis-cli hset user name "alice"
+# Expected: 1
 
-# LLEN
-redis-cli llen mylist
+# HSET — multiple fields
+redis-cli hset user age "30" city "london"
+# Expected: 2
+
+# HGET
+redis-cli hget user name
+# Expected: alice
+
+# HGET missing field
+redis-cli hget user missing
+# Expected: (nil)
+
+# HGETALL
+redis-cli hgetall user
+# Expected: name, alice, age, 30, city, london
+
+# HMGET
+redis-cli hmget user name age missing
+# Expected: alice, 30, (nil)
+
+# HLEN
+redis-cli hlen user
 # Expected: 3
 
-# LPOP and RPOP
-redis-cli lpop mylist
-# Expected: a
+# HDEL
+redis-cli hdel user city
+# Expected: 1
 
-redis-cli rpop mylist
-# Expected: c
+redis-cli hlen user
+# Expected: 2
 
-# BLPOP with timeout
-redis-cli blpop mylist 2
-# Expected: mylist, b (pops immediately since list has data)
-
-# BLPOP on empty list — waits then returns nil
-redis-cli blpop emptylist 1
-# Expected: (nil) after 1 second
+# TYPE
+redis-cli type user
+# Expected: hash
 ```
 
 ## Features
@@ -77,7 +84,7 @@ redis-cli blpop emptylist 1
 - [x] DEL, EXISTS, TYPE
 - [x] INCR / DECR
 - [x] Lists (LPUSH, RPUSH, LPOP, RPOP, LRANGE, LLEN, BLPOP)
-- [ ] Hashes
+- [x] Hashes (HSET, HGET, HGETALL, HMGET, HDEL, HLEN)
 - [ ] Sorted Sets
 - [ ] RDB persistence
 - [ ] Streams
