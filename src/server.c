@@ -11,6 +11,7 @@
 #include "commands.h"
 #include "store.h"
 #include "config.h"
+#include "txn.h"
 
 int server_listen(int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -55,6 +56,9 @@ static char *read_client(int client_fd, ssize_t *out_len) {
 }
 
 static void handle_client(int client_fd, Store *store, Config *cfg) {
+    Txn txn;
+    txn_init(&txn);
+
     ssize_t len;
     char *buf = read_client(client_fd, &len);
     if (!buf || len == 0) { free(buf); close(client_fd); return; }
@@ -64,8 +68,9 @@ static void handle_client(int client_fd, Store *store, Config *cfg) {
 
     if (!cmd) { close(client_fd); return; }
 
-    command_dispatch(client_fd, cmd, store, cfg);
+    command_dispatch(client_fd, cmd, store, cfg, &txn);
     resp_free(cmd);
+    txn_reset(&txn);
     close(client_fd);
 }
 

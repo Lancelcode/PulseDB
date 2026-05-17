@@ -661,7 +661,49 @@ static void cmd_xread(int fd, RespValue *cmd, Store *store) {
         }
     }
 }
-void command_dispatch(int fd, RespValue *cmd, Store *store, Config *cfg) {
+
+static void cmd_multi(int fd, Txn *txn) {
+    if (txn->active) {
+        send_error(fd, "MULTI calls can not be nested");
+        return;
+    }
+    txn->active = 1;
+    send_simple(fd, "OK");
+}
+
+static void cmd_discard(int fd, Txn *txn) {
+    if (!txn->active) {
+        send_error(fd, "DISCARD without MULTI");
+        return;
+    }
+    txn_reset(txn);
+    send_simple(fd, "OK");
+}
+
+static void cmd_exec(int fd, RespValue *cmd, Store *store, Config *cfg, Txn *txn) {
+    (void)cmd;
+    if (!txn->active) {
+        send_error(fd, "EXEC without MULTI");
+        return;
+    }
+
+    if (txn->error) {
+        txn_reset(txn);
+        send_error(fd, "EXECABORT Transaction discarded because of previous errors");
+        return;
+    }
+
+    send_array_header(fd, txn->count);
+
+    /* Execute each queued command and send its response */
+    for (int i = 0; i < txn->count; i++) {
+        command_dispatch(fd, txn->cmds[i], store, cfg, NULL);
+    }
+
+    txn_reset(txn);
+}
+
+void command_dispatch(int fd, RespValue *cmd, Store *store, Config *cfg, Txn *txn) {
     if (!cmd || cmd->type != RESP_ARRAY || cmd->count < 1) {
         send_error(fd, "invalid command");
         return;
@@ -670,6 +712,37 @@ void command_dispatch(int fd, RespValue *cmd, Store *store, Config *cfg) {
     char name[64];
     snprintf(name, sizeof(name), "%s", cmd->elements[0].str);
     str_toupper(name);
+
+    /* Handle transaction control commands first */
+    if (strcmp(name, "MULTI") == 0) {
+        cmd_multi(fd, txn);
+        return;
+    } else if (strcmp(name, "EXEC") == 0) {
+        cmd_exec(fd, cmd, store, cfg, txn);
+        return;
+    } else if (strcmp(name, "DISCARD") == 0) {
+        cmd_discard(fd, txn);
+        return;
+    }
+
+    /* If inside a MULTI block, queue the command instead of executing */
+    if (txn && txn->active) {
+        /* Make a copy of the command to queue */
+        RespValue *copy = malloc(sizeof(RespValue));
+        *copy = *cmd;
+        copy->elements = malloc(cmd->count * sizeof(RespValue));
+        memcpy(copy->elements, cmd->elements, cmd->count * sizeof(RespValue));
+        for (int i = 0; i < cmd->count; i++) {
+            if (cmd->elements[i].str) copy->elements[i].str = strdup(cmd->elements[i].str);
+        }
+
+        if (txn_queue(txn, copy) < 0) {
+            send_error(fd, "ERR transaction queue full");
+        } else {
+            send_simple(fd, "QUEUED");
+        }
+        return;
+    }
 
     if (strcmp(name, "PING") == 0) {
         cmd_ping(fd, cmd);
