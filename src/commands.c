@@ -6,7 +6,7 @@
 #include <limits.h>
 #include <sys/select.h>
 #include <fnmatch.h>
-
+#include "geo.h"
 #include "commands.h"
 #include "store.h"
 
@@ -703,6 +703,110 @@ static void cmd_exec(int fd, RespValue *cmd, Store *store, Config *cfg, Txn *txn
     txn_reset(txn);
 }
 
+static void cmd_geoadd(int fd, RespValue *cmd, Store *store) {
+    /* GEOADD key lng lat member [lng lat member ...] */
+    if (cmd->count < 5 || ((cmd->count - 2) % 3) != 0) {
+        send_error(fd, "wrong number of arguments for 'geoadd'");
+        return;
+    }
+
+    const char *key = cmd->elements[1].str;
+    int added       = 0;
+
+    for (int i = 2; i < cmd->count - 2; i += 3) {
+        double lng    = atof(cmd->elements[i].str);
+        double lat    = atof(cmd->elements[i + 1].str);
+        const char *member = cmd->elements[i + 2].str;
+
+        if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+            send_error(fd, "invalid longitude or latitude");
+            return;
+        }
+
+        double score = (double)geo_encode(lat, lng);
+        int result   = store_zadd(store, key, score, member);
+        if (result < 0) {
+            send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value");
+            return;
+        }
+        added += result;
+    }
+
+    send_integer(fd, added);
+}
+
+static void cmd_geodist(int fd, RespValue *cmd, Store *store) {
+    /* GEODIST key member1 member2 [unit] */
+    if (cmd->count < 4) {
+        send_error(fd, "wrong number of arguments for 'geodist'");
+        return;
+    }
+
+    const char *key     = cmd->elements[1].str;
+    const char *member1 = cmd->elements[2].str;
+    const char *member2 = cmd->elements[3].str;
+    const char *unit    = cmd->count > 4 ? cmd->elements[4].str : "m";
+
+    int found1 = 0, found2 = 0;
+    double score1 = store_zscore(store, key, member1, &found1);
+    double score2 = store_zscore(store, key, member2, &found2);
+
+    if (!found1 || !found2) {
+        send_null(fd);
+        return;
+    }
+
+    double lat1, lng1, lat2, lng2;
+    geo_decode((uint64_t)score1, &lat1, &lng1);
+    geo_decode((uint64_t)score2, &lat2, &lng2);
+
+    double dist_m = geo_distance_m(lat1, lng1, lat2, lng2);
+    double result = dist_m;
+
+    char unit_upper[8];
+    snprintf(unit_upper, sizeof(unit_upper), "%s", unit);
+    str_toupper(unit_upper);
+
+    if (strcmp(unit_upper, "KM") == 0) result = dist_m / 1000.0;
+    else if (strcmp(unit_upper, "MI") == 0) result = dist_m / 1609.344;
+    else if (strcmp(unit_upper, "FT") == 0) result = dist_m * 3.28084;
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%.4f", result);
+    send_bulk(fd, buf);
+}
+
+static void cmd_geopos(int fd, RespValue *cmd, Store *store) {
+    /* GEOPOS key member [member ...] */
+    if (cmd->count < 3) {
+        send_error(fd, "wrong number of arguments for 'geopos'");
+        return;
+    }
+
+    int num_members = cmd->count - 2;
+    send_array_header(fd, num_members);
+
+    for (int i = 2; i < cmd->count; i++) {
+        int    found = 0;
+        double score = store_zscore(store, cmd->elements[1].str, cmd->elements[i].str, &found);
+
+        if (!found) {
+            send_null(fd);
+        } else {
+            double lat, lng;
+            geo_decode((uint64_t)score, &lat, &lng);
+
+            send_array_header(fd, 2);
+
+            char lng_buf[32], lat_buf[32];
+            snprintf(lng_buf, sizeof(lng_buf), "%.17g", lng);
+            snprintf(lat_buf, sizeof(lat_buf), "%.17g", lat);
+            send_bulk(fd, lng_buf);
+            send_bulk(fd, lat_buf);
+        }
+    }
+}
+
 void command_dispatch(int fd, RespValue *cmd, Store *store, Config *cfg, Txn *txn) {
     if (!cmd || cmd->type != RESP_ARRAY || cmd->count < 1) {
         send_error(fd, "invalid command");
@@ -835,6 +939,12 @@ void command_dispatch(int fd, RespValue *cmd, Store *store, Config *cfg, Txn *tx
         cmd_xrange(fd, cmd, store);
     } else if (strcmp(name, "XREAD") == 0) {
         cmd_xread(fd, cmd, store);
+        } else if (strcmp(name, "GEOADD") == 0) {
+        cmd_geoadd(fd, cmd, store);
+    } else if (strcmp(name, "GEODIST") == 0) {
+        cmd_geodist(fd, cmd, store);
+    } else if (strcmp(name, "GEOPOS") == 0) {
+        cmd_geopos(fd, cmd, store);
     } else {
         send_error(fd, "unknown command");
     }
