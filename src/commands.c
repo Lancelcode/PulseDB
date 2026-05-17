@@ -56,7 +56,29 @@ static void cmd_echo(int fd, RespValue *cmd) {
     send_bulk(fd, cmd->elements[1].str);
 }
 
-void command_dispatch(int fd, RespValue *cmd) {
+static void cmd_set(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 3) {
+        send_error(fd, "wrong number of arguments for 'set'");
+        return;
+    }
+    store_set(store, cmd->elements[1].str, cmd->elements[2].str);
+    send_simple(fd, "OK");
+}
+
+static void cmd_get(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 2) {
+        send_error(fd, "wrong number of arguments for 'get'");
+        return;
+    }
+    char *value = store_get(store, cmd->elements[1].str);
+    if (value) {
+        send_bulk(fd, value);
+    } else {
+        send_null(fd);
+    }
+}
+
+void command_dispatch(int fd, RespValue *cmd, Store *store) {
     if (!cmd || cmd->type != RESP_ARRAY || cmd->count < 1) {
         send_error(fd, "invalid command");
         return;
@@ -70,6 +92,10 @@ void command_dispatch(int fd, RespValue *cmd) {
         cmd_ping(fd, cmd);
     } else if (strcmp(name, "ECHO") == 0) {
         cmd_echo(fd, cmd);
+    } else if (strcmp(name, "SET") == 0) {
+        cmd_set(fd, cmd, store);
+    } else if (strcmp(name, "GET") == 0) {
+        cmd_get(fd, cmd, store);
     } else {
         send_error(fd, "unknown command");
     }

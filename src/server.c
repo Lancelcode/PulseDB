@@ -8,6 +8,7 @@
 #include "server.h"
 #include "resp.h"
 #include "commands.h"
+#include "store.h"
 
 int server_listen(int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -61,7 +62,7 @@ static char *read_client(int client_fd, ssize_t *out_len) {
     return buf;
 }
 
-static void handle_client(int client_fd) {
+static void handle_client(int client_fd, Store *store) {
     ssize_t len;
     char *buf = read_client(client_fd, &len);
     if (!buf || len == 0) {
@@ -78,7 +79,7 @@ static void handle_client(int client_fd) {
         return;
     }
 
-    command_dispatch(client_fd, cmd);
+    command_dispatch(client_fd, cmd, store);
     resp_free(cmd);
     close(client_fd);
 }
@@ -86,6 +87,9 @@ static void handle_client(int client_fd) {
 void server_run(int server_fd) {
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
+
+    /* One shared store for all connections */
+    Store *store = store_create();
 
     while (1) {
         int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
@@ -95,6 +99,6 @@ void server_run(int server_fd) {
         }
 
         printf("client connected\n");
-        handle_client(client_fd);
+        handle_client(client_fd, store);
     }
 }
