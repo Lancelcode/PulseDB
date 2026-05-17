@@ -5,6 +5,6 @@
 int main(void) {
     printf("pulsedb starting...\n");
     int server_fd = server_listen(DEFAULT_PORT);
-    (void)server_fd; /* not used yet — accepting connections comes next */
+    server_run(server_fd);
     return 0;
 }

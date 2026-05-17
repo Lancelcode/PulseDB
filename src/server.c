@@ -14,8 +14,6 @@ int server_listen(int port) {
         exit(1);
     }
 
-    /* Allows reuse of the port immediately after the process exits.
-       Without this you'd get "Address already in use" on restart. */
     int opt = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
@@ -37,4 +35,30 @@ int server_listen(int port) {
 
     printf("pulsedb listening on port %d\n", port);
     return fd;
+}
+
+void server_run(int server_fd) {
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+
+    while (1) {
+        int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
+        if (client_fd < 0) {
+            perror("accept");
+            continue;
+        }
+
+        printf("client connected\n");
+
+        /* For now, read whatever the client sends and close the connection.
+           We will replace this with the RESP parser in the next branch. */
+        char buf[1024];
+        ssize_t n = read(client_fd, buf, sizeof(buf) - 1);
+        if (n > 0) {
+            buf[n] = '\0';
+            printf("received: %s\n", buf);
+        }
+
+        close(client_fd);
+    }
 }
