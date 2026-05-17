@@ -15,24 +15,29 @@ make
 ./pulsedb
 ```
 
-## Testing the connection
+## Testing
 
 Start the server, then in a second terminal:
 
 ```bash
+# PING with no args
 redis-cli ping
-```
+# Expected: PONG
 
-You should see the parsed command printed in the server terminal:
-client connected
-parsed command with 1 arg(s):
-[0] PING
+# PING with a message
+redis-cli ping "hello"
+# Expected: hello
+
+# ECHO
+redis-cli echo "hello world"
+# Expected: hello world
+```
 
 ## Features
 
 - [x] TCP server
 - [x] RESP protocol parser
-- [ ] PING / ECHO
+- [x] PING / ECHO
 - [ ] SET / GET
 - [ ] Expiry (EX, PX, TTL, PTTL)
 - [ ] DEL, EXISTS, TYPE
