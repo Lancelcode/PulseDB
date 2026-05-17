@@ -6,6 +6,7 @@
 #include <netinet/in.h>
 
 #include "server.h"
+#include "resp.h"
 
 int server_listen(int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -37,6 +38,65 @@ int server_listen(int port) {
     return fd;
 }
 
+/* Read all available bytes from client into a heap buffer */
+static char *read_client(int client_fd, ssize_t *out_len) {
+    size_t capacity = 4096;
+    size_t total    = 0;
+    char  *buf      = malloc(capacity);
+    if (!buf) return NULL;
+
+    while (1) {
+        ssize_t n = read(client_fd, buf + total, capacity - total - 1);
+        if (n <= 0) break;
+        total += n;
+        if (total >= capacity - 1) {
+            capacity *= 2;
+            buf = realloc(buf, capacity);
+            if (!buf) return NULL;
+        }
+    }
+
+    buf[total] = '\0';
+    *out_len   = total;
+    return buf;
+}
+
+static void handle_client(int client_fd) {
+    ssize_t len;
+    char *buf = read_client(client_fd, &len);
+    if (!buf || len == 0) {
+        free(buf);
+        close(client_fd);
+        return;
+    }
+
+    RespValue *cmd = resp_parse(buf, len);
+    free(buf);
+
+    if (!cmd) {
+        close(client_fd);
+        return;
+    }
+
+    /* Print what we parsed — just for debugging at this stage */
+    if (cmd->type == RESP_ARRAY) {
+        printf("parsed command with %d arg(s):\n", cmd->count);
+        for (int i = 0; i < cmd->count; i++) {
+            if (cmd->elements[i].str) {
+                printf("  [%d] %s\n", i, cmd->elements[i].str);
+            }
+        }
+    }
+
+    resp_free(cmd);
+
+    /* Send a placeholder OK so redis-cli does not hang */
+    const char *ok = "+OK\r\n";
+    write(client_fd, ok, strlen(ok));
+
+    close(client_fd);
+}
+
 void server_run(int server_fd) {
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
@@ -49,16 +109,6 @@ void server_run(int server_fd) {
         }
 
         printf("client connected\n");
-
-        /* For now, read whatever the client sends and close the connection.
-           We will replace this with the RESP parser in the next branch. */
-        char buf[1024];
-        ssize_t n = read(client_fd, buf, sizeof(buf) - 1);
-        if (n > 0) {
-            buf[n] = '\0';
-            printf("received: %s\n", buf);
-        }
-
-        close(client_fd);
+        handle_client(client_fd);
     }
 }
