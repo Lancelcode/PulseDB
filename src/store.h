@@ -13,16 +13,31 @@ typedef struct ListNode {
     struct ListNode *next;
 } ListNode;
 
-/* The list head — tracks both ends for O(1) push/pop */
 typedef struct {
     ListNode *head;
     ListNode *tail;
     int       len;
 } List;
 
+/* A single field-value pair in a hash */
+typedef struct HashField {
+    char             *field;
+    char             *value;
+    struct HashField *next; /* chaining within hash bucket */
+} HashField;
+
+/* A hash is its own small hash table */
+#define HASH_NUM_BUCKETS 64
+
+typedef struct {
+    HashField *buckets[HASH_NUM_BUCKETS];
+    int        len;
+} Hash;
+
 typedef enum {
     STORE_TYPE_STRING,
-    STORE_TYPE_LIST
+    STORE_TYPE_LIST,
+    STORE_TYPE_HASH
 } StoreType;
 
 typedef struct StoreEntry {
@@ -31,9 +46,9 @@ typedef struct StoreEntry {
     int64_t            expires_at;
     struct StoreEntry *next;
 
-    /* Only one of these is used depending on type */
-    char  *value;  /* STORE_TYPE_STRING */
-    List  *list;   /* STORE_TYPE_LIST   */
+    char  *value; /* STORE_TYPE_STRING */
+    List  *list;  /* STORE_TYPE_LIST   */
+    Hash  *hash;  /* STORE_TYPE_HASH   */
 } StoreEntry;
 
 typedef struct {
@@ -57,6 +72,13 @@ char       *store_lpop(Store *store, const char *key);
 char       *store_rpop(Store *store, const char *key);
 int         store_llen(Store *store, const char *key);
 List       *store_get_list(Store *store, const char *key);
+
+/* Hash operations */
+int         store_hset(Store *store, const char *key, const char *field, const char *value);
+char       *store_hget(Store *store, const char *key, const char *field);
+int         store_hdel(Store *store, const char *key, const char *field);
+int         store_hlen(Store *store, const char *key);
+Hash       *store_get_hash(Store *store, const char *key);
 
 void        store_destroy(Store *store);
 
