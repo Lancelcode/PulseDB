@@ -5,6 +5,7 @@
 #include <ctype.h>
 #include <limits.h>
 #include <sys/select.h>
+
 #include "commands.h"
 #include "store.h"
 
@@ -38,7 +39,6 @@ void send_integer(int fd, long val) {
     write(fd, buf, strlen(buf));
 }
 
-/* Send an array header — caller must then send exactly count elements */
 static void send_array_header(int fd, int count) {
     char buf[64];
     snprintf(buf, sizeof(buf), "*%d\r\n", count);
@@ -184,6 +184,8 @@ static void cmd_type(int fd, RespValue *cmd, Store *store) {
         send_simple(fd, "list");
     } else if (t == STORE_TYPE_HASH) {
         send_simple(fd, "hash");
+    } else if (t == STORE_TYPE_ZSET) {
+        send_simple(fd, "zset");
     } else {
         send_simple(fd, "none");
     }
@@ -215,7 +217,6 @@ static void cmd_lpush(int fd, RespValue *cmd, Store *store) {
     const char *key = cmd->elements[1].str;
     int len         = 0;
 
-    /* Push each value left — Redis pushes them in order so last arg ends up at head */
     for (int i = 2; i < cmd->count; i++) {
         len = store_lpush(store, key, cmd->elements[i].str);
         if (len < 0) {
@@ -301,7 +302,6 @@ static void cmd_lrange(int fd, RespValue *cmd, Store *store) {
     List *list = store_get_list(store, cmd->elements[1].str);
 
     if (!list) {
-        /* Empty or missing list returns empty array */
         send_array_header(fd, 0);
         return;
     }
@@ -310,7 +310,6 @@ static void cmd_lrange(int fd, RespValue *cmd, Store *store) {
     int start = atoi(cmd->elements[2].str);
     int stop  = atoi(cmd->elements[3].str);
 
-    /* Normalise negative indices — -1 means last element */
     if (start < 0) start = len + start;
     if (stop  < 0) stop  = len + stop;
     if (start < 0) start = 0;
@@ -324,7 +323,6 @@ static void cmd_lrange(int fd, RespValue *cmd, Store *store) {
     int count = stop - start + 1;
     send_array_header(fd, count);
 
-    /* Walk the list to the start index, then send count elements */
     ListNode *node = list->head;
     for (int i = 0; i < start && node; i++) {
         node = node->next;
@@ -342,17 +340,14 @@ static void cmd_blpop(int fd, RespValue *cmd, Store *store) {
         return;
     }
 
-    /* Last argument is the timeout in seconds (0 = block forever) */
-    double timeout_secs = atof(cmd->elements[cmd->count - 1].str);
-    int64_t deadline    = timeout_secs > 0
-                          ? now_ms() + (int64_t)(timeout_secs * 1000)
-                          : 0;
+    double  timeout_secs = atof(cmd->elements[cmd->count - 1].str);
+    int64_t deadline     = timeout_secs > 0
+                           ? now_ms() + (int64_t)(timeout_secs * 1000)
+                           : 0;
 
-    /* Number of keys is everything between command name and timeout */
     int num_keys = cmd->count - 2;
 
     while (1) {
-        /* Try each key in order — return the first non-empty one */
         for (int i = 1; i <= num_keys; i++) {
             const char *key = cmd->elements[i].str;
             char *value     = store_lpop(store, key);
@@ -366,13 +361,11 @@ static void cmd_blpop(int fd, RespValue *cmd, Store *store) {
             }
         }
 
-        /* All lists empty — check if we have timed out */
         if (deadline > 0 && now_ms() >= deadline) {
             send_null(fd);
             return;
         }
 
-        /* Nothing available yet — sleep 100ms and retry */
         struct timeval tv;
         tv.tv_sec  = 0;
         tv.tv_usec = 100000;
@@ -381,7 +374,6 @@ static void cmd_blpop(int fd, RespValue *cmd, Store *store) {
 }
 
 static void cmd_hset(int fd, RespValue *cmd, Store *store) {
-    /* HSET key field value [field value ...] */
     if (cmd->count < 4 || (cmd->count % 2) != 0) {
         send_error(fd, "wrong number of arguments for 'hset'");
         return;
@@ -396,7 +388,7 @@ static void cmd_hset(int fd, RespValue *cmd, Store *store) {
             send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value");
             return;
         }
-        added += result; /* store_hset returns 1 for new field, 0 for update */
+        added += result;
     }
 
     send_integer(fd, added);
@@ -429,7 +421,6 @@ static void cmd_hgetall(int fd, RespValue *cmd, Store *store) {
         return;
     }
 
-    /* Send 2 * len elements: field, value, field, value... */
     send_array_header(fd, hash->len * 2);
 
     for (int i = 0; i < HASH_NUM_BUCKETS; i++) {
@@ -482,6 +473,152 @@ static void cmd_hlen(int fd, RespValue *cmd, Store *store) {
     }
 
     send_integer(fd, store_hlen(store, cmd->elements[1].str));
+}
+
+static void cmd_zadd(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 4 || (cmd->count % 2) != 0) {
+        send_error(fd, "wrong number of arguments for 'zadd'");
+        return;
+    }
+
+    const char *key = cmd->elements[1].str;
+    int added       = 0;
+
+    for (int i = 2; i < cmd->count - 1; i += 2) {
+        double score  = atof(cmd->elements[i].str);
+        int result    = store_zadd(store, key, score, cmd->elements[i + 1].str);
+        if (result < 0) {
+            send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value");
+            return;
+        }
+        added += result;
+    }
+
+    send_integer(fd, added);
+}
+
+static void cmd_zrange(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 4) {
+        send_error(fd, "wrong number of arguments for 'zrange'");
+        return;
+    }
+
+    ZSet *zset = store_get_zset(store, cmd->elements[1].str);
+
+    if (!zset) {
+        send_array_header(fd, 0);
+        return;
+    }
+
+    int len   = zset->len;
+    int start = atoi(cmd->elements[2].str);
+    int stop  = atoi(cmd->elements[3].str);
+
+    if (start < 0) start = len + start;
+    if (stop  < 0) stop  = len + stop;
+    if (start < 0) start = 0;
+    if (stop  >= len) stop = len - 1;
+
+    if (start > stop) {
+        send_array_header(fd, 0);
+        return;
+    }
+
+    /* Check for optional WITHSCORES flag */
+    int withscores = 0;
+    if (cmd->count > 4) {
+        char opt[16];
+        snprintf(opt, sizeof(opt), "%s", cmd->elements[4].str);
+        str_toupper(opt);
+        if (strcmp(opt, "WITHSCORES") == 0) withscores = 1;
+    }
+
+    int count = stop - start + 1;
+    send_array_header(fd, withscores ? count * 2 : count);
+
+    for (int i = start; i <= stop; i++) {
+        send_bulk(fd, zset->entries[i].member);
+        if (withscores) {
+            char score_buf[64];
+            snprintf(score_buf, sizeof(score_buf), "%g", zset->entries[i].score);
+            send_bulk(fd, score_buf);
+        }
+    }
+}
+
+static void cmd_zrank(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 3) {
+        send_error(fd, "wrong number of arguments for 'zrank'");
+        return;
+    }
+
+    int rank = store_zrank(store, cmd->elements[1].str, cmd->elements[2].str);
+
+    if (rank < 0) {
+        send_null(fd);
+    } else {
+        send_integer(fd, rank);
+    }
+}
+
+static void cmd_zcard(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 2) {
+        send_error(fd, "wrong number of arguments for 'zcard'");
+        return;
+    }
+
+    send_integer(fd, store_zcard(store, cmd->elements[1].str));
+}
+
+static void cmd_zscore(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 3) {
+        send_error(fd, "wrong number of arguments for 'zscore'");
+        return;
+    }
+
+    int    found = 0;
+    double score = store_zscore(store, cmd->elements[1].str, cmd->elements[2].str, &found);
+
+    if (!found) {
+        send_null(fd);
+    } else {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%g", score);
+        send_bulk(fd, buf);
+    }
+}
+
+static void cmd_zrangebyscore(int fd, RespValue *cmd, Store *store) {
+    if (cmd->count < 4) {
+        send_error(fd, "wrong number of arguments for 'zrangebyscore'");
+        return;
+    }
+
+    ZSet *zset = store_get_zset(store, cmd->elements[1].str);
+
+    if (!zset) {
+        send_array_header(fd, 0);
+        return;
+    }
+
+    double min = atof(cmd->elements[2].str);
+    double max = atof(cmd->elements[3].str);
+
+    /* Count matching members first so we can send the array header */
+    int count = 0;
+    for (int i = 0; i < zset->len; i++) {
+        if (zset->entries[i].score >= min && zset->entries[i].score <= max) {
+            count++;
+        }
+    }
+
+    send_array_header(fd, count);
+
+    for (int i = 0; i < zset->len; i++) {
+        if (zset->entries[i].score >= min && zset->entries[i].score <= max) {
+            send_bulk(fd, zset->entries[i].member);
+        }
+    }
 }
 
 void command_dispatch(int fd, RespValue *cmd, Store *store) {
@@ -552,6 +689,18 @@ void command_dispatch(int fd, RespValue *cmd, Store *store) {
         cmd_hdel(fd, cmd, store);
     } else if (strcmp(name, "HLEN") == 0) {
         cmd_hlen(fd, cmd, store);
+    } else if (strcmp(name, "ZADD") == 0) {
+        cmd_zadd(fd, cmd, store);
+    } else if (strcmp(name, "ZRANGE") == 0) {
+        cmd_zrange(fd, cmd, store);
+    } else if (strcmp(name, "ZRANK") == 0) {
+        cmd_zrank(fd, cmd, store);
+    } else if (strcmp(name, "ZCARD") == 0) {
+        cmd_zcard(fd, cmd, store);
+    } else if (strcmp(name, "ZSCORE") == 0) {
+        cmd_zscore(fd, cmd, store);
+    } else if (strcmp(name, "ZRANGEBYSCORE") == 0) {
+        cmd_zrangebyscore(fd, cmd, store);
     } else {
         send_error(fd, "unknown command");
     }
