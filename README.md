@@ -1,23 +1,27 @@
+```
 ██████╗ ██╗   ██╗██╗     ███████╗███████╗██████╗ ██████╗
 ██╔══██╗██║   ██║██║     ██╔════╝██╔════╝██╔══██╗██╔══██╗
 ██████╔╝██║   ██║██║     ███████╗█████╗  ██║  ██║██████╔╝
 ██╔═══╝ ██║   ██║██║     ╚════██║██╔══╝  ██║  ██║██╔══██╗
 ██║     ╚██████╔╝███████╗███████║███████╗██████╔╝██████╔╝
 ╚═╝      ╚═════╝ ╚══════╝╚══════╝╚══════╝╚═════╝ ╚═════╝
-
 A Redis-compatible server built from scratch in C99
+```
 
-````
+![C](https://img.shields.io/badge/C99-00599C?style=for-the-badge&logo=c&logoColor=white)
+![Make](https://img.shields.io/badge/Make-427819?style=for-the-badge&logo=gnu&logoColor=white)
+![GCC](https://img.shields.io/badge/GCC-A42E2B?style=for-the-badge&logo=gcc&logoColor=white)
+![Redis](https://img.shields.io/badge/RESP_Protocol-FF4438?style=for-the-badge&logo=redis&logoColor=white)
+![Platform](https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)
+![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
 
-$ cat problem.txt
-Redis is one of the most widely used pieces of infrastructure in the world.
-Most engineers use it daily without knowing how it actually works inside.
+Redis is one of the most widely used pieces of infrastructure in the world. Most engineers use it daily without knowing how it actually works inside.
 
-PulseDB is a ground-up reimplementation of the Redis server — the wire
-protocol, the in-memory store, expiry, persistence, streams, transactions,
-and geo — written in C99 with no dependencies, to understand the layer
-that most engineers never touch.
+PulseDB is a ground-up reimplementation of the Redis server — the wire protocol, the in-memory store, expiry, persistence, streams, transactions, and geo — written in C99 with no dependencies, to understand the layer that most engineers never touch.
 
+---
+
+```
 $ cat stack.txt
 {
   "language"    : "C99",
@@ -27,7 +31,11 @@ $ cat stack.txt
   "testing"     : "redis-cli — speaks standard RESP, drop-in compatible",
   "dependencies": "none"
 }
+```
 
+---
+
+```
 $ ls -la src/
 File            Role
 server.c        TCP accept loop, SO_REUSEADDR, client connection handling
@@ -38,14 +46,22 @@ rdb.c           RDB file loader — restores persisted string keys on startup
 txn.c           MULTI/EXEC transaction queue, per-connection state
 geo.c           52-bit interleaved geohash encoding, Haversine distance
 config.c        Server configuration with defaults (port, hz, dir, dbfilename)
+```
 
+---
+
+```
 $ cat architecture.txt
 Client ──TCP──▶ RESP parser ──▶ Command dispatcher ──▶ In-memory store ──▶ Response
 
 Every connection is read into a buffer, parsed as a RESP array,
 dispatched to the matching handler, and responded to before the
 connection closes. One thread. No event loop library. No magic.
+```
 
+---
+
+```
 $ ls -la commands/
 Category        Commands
 Strings         SET GET INCR DECR INCRBY DECRBY
@@ -58,7 +74,11 @@ Streams         XADD XRANGE XREAD
 Transactions    MULTI EXEC DISCARD
 Geo             GEOADD GEODIST GEOPOS
 Server          PING ECHO CONFIG GET
+```
 
+---
+
+```
 $ cat internals.txt
 The interesting parts are not the command handlers. They are the data structures.
 
@@ -96,7 +116,11 @@ RDB persistence
   On startup, PulseDB reads ./dump.rdb if present. Handles auxiliary fields,
   database selectors, resize hints, millisecond and second expiry opcodes,
   and string value entries — compatible with real Redis dump files.
+```
 
+---
+
+```
 $ git clone && make
 git clone https://github.com/Lancelcode/PulseDB.git
 cd PulseDB
@@ -104,7 +128,9 @@ make
 ./pulsedb
 # pulsedb starting...
 # pulsedb listening on port 6379
+```
 
+```
 $ redis-cli ping
 PONG
 
@@ -114,6 +140,30 @@ OK
 $ redis-cli get name
 "pulsedb"
 
+$ redis-cli hset user name alice age 30 city edinburgh
+(integer) 3
+
+$ redis-cli zadd leaderboard 100 alice 200 bob 150 charlie
+(integer) 3
+
+$ redis-cli zrange leaderboard 0 -1 WITHSCORES
+1) "alice"
+2) "100"
+3) "charlie"
+4) "150"
+5) "bob"
+6) "200"
+
+$ redis-cli xadd events '*' action login user alice
+"1234567890123-0"
+
+$ redis-cli geoadd locations -3.1883 55.9533 edinburgh
+(integer) 1
+```
+
+---
+
+```
 $ cat roadmap.log
 [done] ████████████████████  TCP server              Accept loop, SO_REUSEADDR, BACKLOG 128
 [done] ████████████████████  RESP parser             Arrays, bulk strings, integers, nulls
@@ -131,6 +181,8 @@ $ cat roadmap.log
 [next] ░░░░░░░░░░░░░░░░░░░░  WATCH / UNWATCH         Optimistic locking for transactions
 [next] ░░░░░░░░░░░░░░░░░░░░  Active expiry           Background sweep for expired keys
 [next] ░░░░░░░░░░░░░░░░░░░░  RDB save                Persist the store to disk on shutdown
+```
 
-Built by Djiby Sow Rebollo — Edinburgh, Scotland
-````
+---
+
+Built by [Djiby Sow Rebollo](https://github.com/Lancelcode) — Edinburgh, Scotland
