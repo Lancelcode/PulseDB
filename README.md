@@ -10,7 +10,6 @@ A Redis-compatible server built from scratch in C99
 
 ![C](https://img.shields.io/badge/C99-00599C?style=for-the-badge&logo=c&logoColor=white)
 ![Make](https://img.shields.io/badge/Make-427819?style=for-the-badge&logo=gnu&logoColor=white)
-![GCC](https://img.shields.io/badge/GCC-A42E2B?style=for-the-badge&logo=gcc&logoColor=white)
 ![Redis](https://img.shields.io/badge/RESP_Protocol-FF4438?style=for-the-badge&logo=redis&logoColor=white)
 ![Platform](https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)
 ![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
@@ -20,6 +19,18 @@ Redis is one of the most widely used pieces of infrastructure in the world. Most
 PulseDB is a ground-up reimplementation of the Redis server — the wire protocol, the in-memory store, expiry, persistence, streams, transactions, and geo — written in C99 with no dependencies, to understand the layer that most engineers never touch.
 
 ---
+
+```
+$ cat problem.txt
+Redis is everywhere. It is the default cache, the session store, the
+pub/sub bus. Every backend engineer depends on it. Almost none of them
+know how it actually works at the protocol level — how a command travels
+from redis-cli to the server, how keys expire without a background thread,
+how sorted sets stay sorted, how streams handle auto-sequenced IDs.
+
+PulseDB is the answer to that question. Built line by line, decision by
+decision, in C99. No libevent. No hiredis. No dependencies.
+```
 
 ```
 $ cat stack.txt
@@ -32,8 +43,6 @@ $ cat stack.txt
   "dependencies": "none"
 }
 ```
-
----
 
 ```
 $ ls -la src/
@@ -48,8 +57,6 @@ geo.c           52-bit interleaved geohash encoding, Haversine distance
 config.c        Server configuration with defaults (port, hz, dir, dbfilename)
 ```
 
----
-
 ```
 $ cat architecture.txt
 Client ──TCP──▶ RESP parser ──▶ Command dispatcher ──▶ In-memory store ──▶ Response
@@ -58,8 +65,6 @@ Every connection is read into a buffer, parsed as a RESP array,
 dispatched to the matching handler, and responded to before the
 connection closes. One thread. No event loop library. No magic.
 ```
-
----
 
 ```
 $ ls -la commands/
@@ -75,8 +80,6 @@ Transactions    MULTI EXEC DISCARD
 Geo             GEOADD GEODIST GEOPOS
 Server          PING ECHO CONFIG GET
 ```
-
----
 
 ```
 $ cat internals.txt
@@ -118,8 +121,6 @@ RDB persistence
   and string value entries — compatible with real Redis dump files.
 ```
 
----
-
 ```
 $ git clone && make
 git clone https://github.com/Lancelcode/PulseDB.git
@@ -127,6 +128,7 @@ cd PulseDB
 make
 ./pulsedb
 # pulsedb starting...
+# no RDB file found at ./dump.rdb, starting empty
 # pulsedb listening on port 6379
 ```
 
@@ -142,6 +144,14 @@ $ redis-cli get name
 
 $ redis-cli hset user name alice age 30 city edinburgh
 (integer) 3
+
+$ redis-cli hgetall user
+1) "name"
+2) "alice"
+3) "age"
+4) "30"
+5) "city"
+6) "edinburgh"
 
 $ redis-cli zadd leaderboard 100 alice 200 bob 150 charlie
 (integer) 3
@@ -159,9 +169,20 @@ $ redis-cli xadd events '*' action login user alice
 
 $ redis-cli geoadd locations -3.1883 55.9533 edinburgh
 (integer) 1
-```
 
----
+$ redis-cli geodist locations edinburgh london km
+"534.7412"
+
+$ redis-cli multi
+OK
+$ redis-cli set balance 100
+QUEUED
+$ redis-cli incr balance
+QUEUED
+$ redis-cli exec
+1) OK
+2) (integer) 101
+```
 
 ```
 $ cat roadmap.log
@@ -183,6 +204,8 @@ $ cat roadmap.log
 [next] ░░░░░░░░░░░░░░░░░░░░  RDB save                Persist the store to disk on shutdown
 ```
 
+Part of a larger learning arc  see my [profile](https://github.com/Lancelcode) for the full picture.
+
 ---
 
-Built by [Djiby Sow Rebollo](https://github.com/Lancelcode) — Edinburgh, Scotland
+Built by [Djiby Sow Rebollo](https://github.com/Lancelcode) Edinburgh, Scotland
