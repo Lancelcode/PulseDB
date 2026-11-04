@@ -66,6 +66,7 @@ holds, runs them in order, and writes the replies back when the socket is ready.
 | `src/geo.c`      | 52-bit interleaved geohash, haversine distance |
 | `src/rdb.c`      | RDB file loader |
 | `src/config.c`   | Defaults and command-line options |
+| `tools/cli.c`    | `pulsedb-cli` client and REPL |
 
 ## Key design decisions
 
@@ -94,11 +95,13 @@ being served in the meantime.
 access, integer overflow and invalid stream IDs are all reported rather than corrupting data.
 
 **Data structures.**
-- Keyspace: a chained hash table (djb2) with 1024 buckets.
+- Keyspace: a chained hash table that doubles when it fills up, with each entry caching its
+  64-bit hash so lookups rarely need a full string comparison.
 - Lists: doubly linked, O(1) push and pop at either end.
 - Hashes: a 64-bucket chained hash table per key.
-- Sorted sets: an array kept ordered by (score, member). Insertion uses binary search;
-  looking up a member by name is a linear scan.
+- Sorted sets: an array kept ordered by (score, member) for range queries, plus a hash
+  index from member to score. Score lookups are O(1) and ranks O(log n); inserting still
+  shifts the array, which is O(n) but a fast `memmove`.
 - Streams: an append-only linked list with strictly increasing `ms-seq` IDs.
 - Geo: latitude and longitude are each quantised to 26 bits and interleaved into a 52-bit
   integer, stored as a sorted-set score (the same encoding Redis uses).
@@ -135,6 +138,65 @@ port and check each command family, transactions, pipelining, `BLPOP` wake-up an
 an idle client not stalling the server, and protocol-error handling. GitHub Actions runs
 them with GCC and Clang, and again under the sanitisers, on every push and pull request.
 
+## Command-line client
+
+`make` also builds `pulsedb-cli`, a small client with no dependencies. It works with
+PulseDB or any Redis server.
+
+```sh
+./pulsedb-cli set greeting "hello world"       # one-shot: run a command and exit
+./pulsedb-cli -h 10.0.0.5 -p 7000 get greeting
+./pulsedb-cli                                  # interactive prompt
+127.0.0.1:6379> rpush jobs "resize image" email
+(integer) 2
+127.0.0.1:6379> lrange jobs 0 -1
+1) "resize image"
+2) "email"
+127.0.0.1:6379> quit
+```
+
+Words are separated by spaces. Use `"double"` or `'single'` quotes for values containing
+spaces; inside double quotes, `\n`, `\t`, `\"` and `\\` are escapes. Replies are printed in
+the same style as `redis-cli`. When input is piped in, the prompt is omitted, so scripts
+can send a batch of commands: `printf 'incr hits\nget hits\n' | ./pulsedb-cli`.
+
+## Docker
+
+```sh
+docker build -t pulsedb .
+docker run -d --name pulsedb -p 6379:6379 -v pulsedb-data:/data pulsedb
+docker exec -it pulsedb pulsedb-cli          # client inside the container
+./pulsedb-cli -p 6379 ping                   # or from the host
+```
+
+The image is a two-stage build: the first stage compiles PulseDB and runs the full test
+suite, and the second ships only the two binaries on `debian:bookworm-slim`, running as a
+non-root user. Inside the container the server binds to `0.0.0.0` and reads its RDB file
+from `/data`. Extra arguments after the image name are passed to `pulsedb`, for example
+`docker run pulsedb --port 7000`. If Docker Hub is unavailable, pass a mirror with
+`--build-arg BASE_IMAGE=<registry>/debian:bookworm-slim`.
+
+## Examples
+
+The [`examples/`](examples) folder has three small programs:
+
+| Example | Shows |
+|---------|-------|
+| [`leaderboard.sh`](examples/leaderboard.sh) | A game leaderboard with `ZADD`, `ZRANGE ... WITHSCORES`, `ZRANGEBYSCORE` and `ZRANK` |
+| [`job_queue.sh`](examples/job_queue.sh) | A worker blocked in `BLPOP` woken by a producer, plus a `MULTI`/`EXEC` counter update |
+| [`embedded_geo.c`](examples/embedded_geo.c) | Using the store as an in-process C library: geohash encoding and distances, no server |
+
+```sh
+make examples
+./pulsedb &                       # the shell examples need a running server
+examples/leaderboard.sh
+examples/job_queue.sh
+./build/embedded_geo
+```
+
+The shell scripts use `./pulsedb-cli` on port 6379; set `PULSEDB_CLI` or `PULSEDB_PORT`
+to change that.
+
 ## Benchmarks
 
 ```sh
@@ -147,26 +209,54 @@ server process over loopback TCP, so they include parsing, dispatch and system c
 "Pipeline 32" sends 32 commands before waiting for the replies.
 
 Measured on a 4-vCPU Intel Xeon VM at 2.10 GHz with 15 GiB RAM, running Ubuntu 24.04 and
-GCC 13.3 at `-O2`. Each figure is from a single run. Repeat runs varied by up to about 20%, and the sorted-set
-rows by more, so treat the numbers as orders of magnitude rather than precise values.
+GCC 13.3 at `-O2`. Each figure is the median of three runs; individual runs varied by up to
+about 20%, so treat small differences as noise.
 
-| Layer   | Operation                    | Ops/sec   | ns/op  |
-|---------|------------------------------|----------:|-------:|
-| store   | SET (insert 200k new keys)   |   430,000 |  2,300 |
-| store   | GET (random point reads)     |   150,000 |  6,700 |
-| store   | HSET (1k hashes)             | 3,360,000 |    300 |
-| store   | List scan, first 100 items   | 6,180,000 |    160 |
-| store   | ZADD (one set, 20k members)  |    34,000 | 29,000 |
-| store   | ZSCORE (random members)      |    35,000 | 29,000 |
-| store   | XADD (auto IDs)              | 3,440,000 |    290 |
-| network | SET, no pipelining           |    28,000 | 36,000 |
-| network | GET, no pipelining           |    27,000 | 36,000 |
-| network | SET, pipeline 32             |   187,000 |  5,400 |
-| network | GET, pipeline 32             |   109,000 |  9,200 |
+| Layer   | Operation                    | Before (ops/s) | After (ops/s) | Speed-up |
+|---------|------------------------------|---------------:|--------------:|---------:|
+| store   | SET (insert 200k new keys)   |        363,000 |     4,050,000 |    11×   |
+| store   | GET (random point reads)     |        144,000 |     4,440,000 |    31×   |
+| store   | HSET (1k hashes)             |      3,590,000 |     5,270,000 |   1.5×   |
+| store   | List scan, first 100 items   |      5,930,000 |     6,820,000 | (noise)  |
+| store   | ZADD (one set, 20k members)  |         37,600 |       594,000 |    16×   |
+| store   | ZSCORE (random members)      |         33,700 |     9,550,000 |   280×   |
+| store   | XADD (auto IDs)              |      3,160,000 |     3,920,000 | (noise)  |
+| network | SET, no pipelining           |         26,500 |        27,000 |   1.0×   |
+| network | GET, no pipelining           |         25,900 |        26,800 |   1.0×   |
+| network | SET, pipeline 32             |        174,000 |       576,000 |   3.3×   |
+| network | GET, pipeline 32             |        107,000 |       521,000 |   4.9×   |
 
-Two weak spots stand out. Point reads slow down as the keyspace grows because the table
-has a fixed 1024 buckets, so 200k keys means chains of about 200 entries. Sorted-set
-operations are linear in the size of the set because members are found by scanning.
+"Before" is the code after the correctness fixes but before any optimisation; "after" is
+the current code.
+
+### What was optimised, and why
+
+I profiled the benchmarks with Valgrind's `callgrind` (the store benchmark directly, and the
+server process while the network benchmark ran against it) and fixed the three hottest
+paths:
+
+1. **Keyspace hash table.** `strcmp` was 41% of all instructions in the store benchmark,
+   mostly from walking bucket chains. The table had a fixed 1024 buckets, so at 200k keys
+   each chain held about 200 entries. It now doubles whenever the number of keys exceeds
+   the number of buckets, and each entry caches its 64-bit FNV-1a hash, so a chain walk
+   compares integers and only calls `strcmp` on a likely match.
+2. **Sorted-set member lookup.** `store_zset_add` and `store_zset_score` together took 56%
+   of the store benchmark, because every lookup by member name scanned the whole array.
+   Each sorted set now also keeps a hash index from member to score: `ZSCORE` is O(1), and
+   `ZRANK` and `ZADD` find the member's slot by binary search on (score, member).
+3. **Command dispatch.** In the server profile, `strcasecmp` was 8% of instructions, because
+   each request scanned the command table linearly and then made three more comparisons
+   for `MULTI`/`EXEC`/`DISCARD`. Commands are now found through a small hash table keyed
+   on the lower-cased name.
+
+Unpipelined network throughput did not change. Each request there waits for a full
+loopback round trip, so the cost is in system calls and scheduling rather than in
+PulseDB's code. Pipelining is what exposes the server's own CPU cost, which is where the
+3–5× gain shows.
+
+The next hot spot in the server profile is memory allocation: each request allocates a
+parsed array and a copy of every argument (`malloc` and `free` were about 25% of
+instructions). Parsing arguments in place in the input buffer would remove most of that.
 
 ## Limitations
 
@@ -182,8 +272,9 @@ These are deliberate scope limits rather than bugs:
 
 ## Roadmap
 
-- Resizable keyspace hash table
-- Sorted sets with O(log n) member lookup
+- Zero-copy request parsing to cut per-request allocation
+- A skip list for sorted sets, so inserts are O(log n) too
+- Incremental rehashing, so growing a very large keyspace never pauses the server
 - `SAVE`/`BGSAVE` and loading of all RDB value types
 - `EXPIRE`, `WATCH` and active expiry
 
