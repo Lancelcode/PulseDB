@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -167,7 +168,33 @@ static void test_scan_skips_expired(void) {
     store_destroy(s);
 }
 
+static void test_keyspace_growth(void) {
+    /* Force many resizes, then check every key survived them. */
+    Store *s = store_create();
+    char key[32], val[32];
+    for (int i = 0; i < 20000; i++) {
+        snprintf(key, sizeof(key), "k%d", i);
+        snprintf(val, sizeof(val), "v%d", i);
+        store_set(s, key, val, 0);
+    }
+    CHECK(store_count(s) == 20000);
+    CHECK(s->size >= 20000);
+    int ok = 1;
+    for (int i = 0; i < 20000; i++) {
+        snprintf(key, sizeof(key), "k%d", i);
+        snprintf(val, sizeof(val), "v%d", i);
+        const char *v;
+        if (store_get(s, key, &v) != STORE_OK || strcmp(v, val) != 0) ok = 0;
+        if (i % 2 == 0) store_del(s, key);
+    }
+    CHECK(ok);
+    CHECK(store_count(s) == 10000);
+    CHECK(!store_exists(s, "k0") && store_exists(s, "k1"));
+    store_destroy(s);
+}
+
 void suite_store(void) {
+    run_test("store: keyspace survives resizing", test_keyspace_growth);
     run_test("store: set/get/overwrite/del", test_set_get_overwrite);
     run_test("store: expired keys are unlinked", test_expired_key_is_removed);
     run_test("store: SET replaces other types", test_set_replaces_other_types);
