@@ -36,6 +36,6 @@ void suite_resp(void);
 void suite_store(void);
 void suite_geo(void);
 void suite_rdb(void);
-void suite_e2e(const char *server_path);
+void suite_e2e(const char *server_path, const char *cli_path);
 
 #endif
