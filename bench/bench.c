@@ -136,8 +136,8 @@ static pid_t start_server(const char *path, int *port) {
     char  line[256];
     *port = 0;
     while (fgets(line, sizeof(line), out)) {
-        char *p = strstr(line, "listening on ");
-        if (p) { *port = atoi(strrchr(p, ':') + 1); break; }
+        char *p = (strstr)(line, "listening on ");
+        if (p) { *port = atoi((strrchr)(p, ':') + 1); break; }
     }
     fclose(out);
     return *port ? pid : -1;
