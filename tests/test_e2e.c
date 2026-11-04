@@ -165,6 +165,9 @@ static void test_errors_do_not_crash(void) {
     CHECK_STR(cmd(c1, 2, "NOPE", "x"), "-ERR unknown command 'NOPE'");
     CHECK_STR(cmd(c1, 3, "LPUSH", "l", "a"), ":1");
     CHECK_STR(cmd(c1, 2, "GET", "l"), "-WRONGTYPE Operation against a key holding the wrong kind of value");
+    CHECK_STR(cmd(c1, 1, "pInG"), "+PONG");  /* names are case-insensitive */
+    CHECK_STR(cmd(c1, 1, "zrangebyscorezrangebyscorezrangebyscore"),
+              "-ERR unknown command 'zrangebyscorezrangebyscorezrangebyscore'");
     CHECK_STR(cmd(c1, 1, "PING"), "+PONG");  /* connection still usable */
 }
 
