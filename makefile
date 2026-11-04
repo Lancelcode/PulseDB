@@ -44,8 +44,9 @@ $(BENCH_BIN): bench/bench.c $(LIB)
 test: $(TARGET) $(TEST_BIN)
 	./$(TEST_BIN) ./$(TARGET)
 
-bench: $(BENCH_BIN)
-	./$(BENCH_BIN)
+# BENCH_ARGS=--quick runs a smaller workload (used in CI).
+bench: $(TARGET) $(BENCH_BIN)
+	./$(BENCH_BIN) --server ./$(TARGET) $(BENCH_ARGS)
 
 # Rebuild everything with AddressSanitizer and UBSan, then run the tests.
 sanitize:
