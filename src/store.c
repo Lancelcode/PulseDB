@@ -68,7 +68,21 @@ static void free_hash(Hash *hash) {
     free(hash);
 }
 
+typedef struct ZIndexNode {
+    const char        *member;  /* points at the string owned by the entries array */
+    uint64_t           hash;
+    double             score;
+    struct ZIndexNode *next;
+} ZIndexNode;
+
+static uint64_t hash64(const char *key);
+
 static void free_zset(ZSet *zset) {
+    for (size_t i = 0; i < zset->index_size; i++) {
+        ZIndexNode *n = zset->index[i];
+        while (n) { ZIndexNode *next = n->next; free(n); n = next; }
+    }
+    free(zset->index);
     for (size_t i = 0; i < zset->len; i++) free(zset->entries[i].member);
     free(zset->entries);
     free(zset);
@@ -389,11 +403,47 @@ static int zset_cmp(double score, const char *member, const ZSetEntry *e) {
     return strcmp(member, e->member);
 }
 
-static long zset_find(const ZSet *zset, const char *member) {
-    for (size_t i = 0; i < zset->len; i++) {
-        if (strcmp(zset->entries[i].member, member) == 0) return (long)i;
+static ZIndexNode *zindex_find(const ZSet *zset, const char *member, uint64_t h) {
+    if (!zset->index_size) return NULL;
+    for (ZIndexNode *n = zset->index[h & (zset->index_size - 1)]; n; n = n->next) {
+        if (n->hash == h && strcmp(n->member, member) == 0) return n;
     }
-    return -1;
+    return NULL;
+}
+
+static void zindex_add(ZSet *zset, const char *member, uint64_t h, double score) {
+    if (zset->len >= zset->index_size) {
+        size_t       size = zset->index_size ? zset->index_size * 2 : 8;
+        ZIndexNode **nb   = xcalloc(size, sizeof(ZIndexNode *));
+        for (size_t i = 0; i < zset->index_size; i++) {
+            ZIndexNode *n = zset->index[i];
+            while (n) {
+                ZIndexNode *next = n->next;
+                n->next = nb[n->hash & (size - 1)];
+                nb[n->hash & (size - 1)] = n;
+                n = next;
+            }
+        }
+        free(zset->index);
+        zset->index      = nb;
+        zset->index_size = size;
+    }
+    ZIndexNode *n = xmalloc(sizeof(ZIndexNode));
+    n->member = member;
+    n->hash   = h;
+    n->score  = score;
+    n->next   = zset->index[h & (zset->index_size - 1)];
+    zset->index[h & (zset->index_size - 1)] = n;
+}
+
+/* First position whose (score, member) is >= the given pair. */
+static size_t zset_lower_bound(const ZSet *zset, double score, const char *member) {
+    size_t lo = 0, hi = zset->len;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (zset_cmp(score, member, &zset->entries[mid]) > 0) lo = mid + 1; else hi = mid;
+    }
+    return lo;
 }
 
 /* Insert (score, member) at its sorted position; member is owned by the set. */
@@ -402,11 +452,7 @@ static void zset_insert(ZSet *zset, double score, char *member) {
         zset->cap = zset->cap ? zset->cap * 2 : 8;
         zset->entries = xrealloc(zset->entries, zset->cap * sizeof(ZSetEntry));
     }
-    size_t lo = 0, hi = zset->len;
-    while (lo < hi) {
-        size_t mid = lo + (hi - lo) / 2;
-        if (zset_cmp(score, member, &zset->entries[mid]) > 0) lo = mid + 1; else hi = mid;
-    }
+    size_t lo = zset_lower_bound(zset, score, member);
     memmove(&zset->entries[lo + 1], &zset->entries[lo], (zset->len - lo) * sizeof(ZSetEntry));
     zset->entries[lo].member = member;
     zset->entries[lo].score  = score;
@@ -421,20 +467,26 @@ StoreStatus store_zset_add(Store *store, const char *key, double score, const ch
         e = create_entry(store, key, STORE_TYPE_ZSET);
         e->v.zset = xcalloc(1, sizeof(ZSet));
     }
-    ZSet *zset = e->v.zset;
-    long  i    = zset_find(zset, member);
-    if (i >= 0) {
+    ZSet       *zset = e->v.zset;
+    uint64_t    h    = hash64(member);
+    ZIndexNode *node = zindex_find(zset, member, h);
+    if (node) {
         if (added) *added = 0;
-        if (zset->entries[i].score == score) return STORE_OK;
-        /* Remove and re-insert so the array stays sorted whether the
-           score went up or down. */
-        char *owned = zset->entries[i].member;
-        memmove(&zset->entries[i], &zset->entries[i + 1], (zset->len - (size_t)i - 1) * sizeof(ZSetEntry));
+        if (node->score == score) return STORE_OK;
+        /* Find the old slot by binary search, then remove and re-insert so
+           the array stays sorted whether the score went up or down. The
+           member string keeps its address, so the index stays valid. */
+        size_t i     = zset_lower_bound(zset, node->score, member);
+        char  *owned = zset->entries[i].member;
+        memmove(&zset->entries[i], &zset->entries[i + 1], (zset->len - i - 1) * sizeof(ZSetEntry));
         zset->len--;
         zset_insert(zset, score, owned);
+        node->score = score;
         return STORE_OK;
     }
-    zset_insert(zset, score, xstrdup(member));
+    char *owned = xstrdup(member);
+    zindex_add(zset, owned, h, score);
+    zset_insert(zset, score, owned);
     if (added) *added = 1;
     return STORE_OK;
 }
@@ -443,9 +495,9 @@ StoreStatus store_zset_score(Store *store, const char *key, const char *member, 
     StoreEntry *e;
     StoreStatus st = lookup_typed(store, key, STORE_TYPE_ZSET, &e);
     if (st != STORE_OK) return st;
-    long i = zset_find(e->v.zset, member);
-    if (i < 0) return STORE_NOT_FOUND;
-    *score = e->v.zset->entries[i].score;
+    ZIndexNode *node = zindex_find(e->v.zset, member, hash64(member));
+    if (!node) return STORE_NOT_FOUND;
+    *score = node->score;
     return STORE_OK;
 }
 
@@ -453,9 +505,9 @@ StoreStatus store_zset_rank(Store *store, const char *key, const char *member, s
     StoreEntry *e;
     StoreStatus st = lookup_typed(store, key, STORE_TYPE_ZSET, &e);
     if (st != STORE_OK) return st;
-    long i = zset_find(e->v.zset, member);
-    if (i < 0) return STORE_NOT_FOUND;
-    *rank = (size_t)i;
+    ZIndexNode *node = zindex_find(e->v.zset, member, hash64(member));
+    if (!node) return STORE_NOT_FOUND;
+    *rank = zset_lower_bound(e->v.zset, node->score, member);
     return STORE_OK;
 }
 

@@ -193,7 +193,40 @@ static void test_keyspace_growth(void) {
     store_destroy(s);
 }
 
+static void test_zset_index_consistency(void) {
+    /* Random inserts and score changes; afterwards the array must be
+       sorted and the index must agree with it for every member. */
+    Store *s = store_create();
+    unsigned seed = 12345;
+    char member[16];
+    for (int i = 0; i < 5000; i++) {
+        seed = seed * 1103515245u + 12345u;
+        snprintf(member, sizeof(member), "m%u", (seed >> 8) % 1500);
+        store_zset_add(s, "z", (double)((seed >> 4) % 100), member, NULL);
+    }
+    const ZSet *z;
+    CHECK(store_get_zset(s, "z", &z) == STORE_OK);
+    int sorted = 1, consistent = 1;
+    for (size_t i = 0; i < z->len; i++) {
+        if (i > 0) {
+            const ZSetEntry *a = &z->entries[i - 1], *b = &z->entries[i];
+            if (a->score > b->score || (a->score == b->score && strcmp(a->member, b->member) >= 0)) sorted = 0;
+        }
+        double score;
+        size_t rank;
+        if (store_zset_score(s, "z", z->entries[i].member, &score) != STORE_OK || score != z->entries[i].score)
+            consistent = 0;
+        if (store_zset_rank(s, "z", z->entries[i].member, &rank) != STORE_OK || rank != i)
+            consistent = 0;
+    }
+    CHECK(sorted);
+    CHECK(consistent);
+    CHECK(z->len <= 1500 && z->len > 1000);
+    store_destroy(s);
+}
+
 void suite_store(void) {
+    run_test("store: sorted set index stays consistent", test_zset_index_consistency);
     run_test("store: keyspace survives resizing", test_keyspace_growth);
     run_test("store: set/get/overwrite/del", test_set_get_overwrite);
     run_test("store: expired keys are unlinked", test_expired_key_is_removed);
