@@ -19,7 +19,7 @@ TEST_SRCS  = $(wildcard tests/*.c)
 TEST_BIN   = $(BUILD_DIR)/run_tests
 BENCH_BIN  = $(BUILD_DIR)/bench
 
-.PHONY: all clean test bench sanitize
+.PHONY: all clean test bench sanitize examples
 
 all: $(TARGET) $(CLI)
 
@@ -43,6 +43,14 @@ $(TEST_BIN): $(TEST_SRCS) $(wildcard tests/*.h) $(LIB)
 
 $(BENCH_BIN): bench/bench.c $(LIB)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(SRC_DIR) -o $@ $< $(LIB) $(LDFLAGS) $(LDLIBS)
+
+# Example programs that embed the store library.
+EXAMPLE_BINS = $(patsubst examples/%.c,$(BUILD_DIR)/%,$(wildcard examples/*.c))
+
+$(BUILD_DIR)/%: examples/%.c $(LIB)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(SRC_DIR) -o $@ $< $(LIB) $(LDFLAGS) $(LDLIBS)
+
+examples: all $(EXAMPLE_BINS)
 
 # Unit tests plus end-to-end tests against a real server process.
 test: $(TARGET) $(CLI) $(TEST_BIN)
