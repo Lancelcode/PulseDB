@@ -6,7 +6,7 @@
 #include "store.h"
 #include "util.h"
 
-/* djb2 */
+/* djb2, used for the small per-key hash tables */
 static unsigned int hash_key(const char *key, unsigned int num_buckets) {
     unsigned int h = 5381;
     while (*key) {
@@ -16,8 +16,40 @@ static unsigned int hash_key(const char *key, unsigned int num_buckets) {
     return h % num_buckets;
 }
 
+/* 64-bit FNV-1a for the keyspace. The full hash is cached in each entry so
+   chain walks compare integers and only call strcmp on a likely match. */
+static uint64_t hash64(const char *key) {
+    uint64_t h = 1469598103934665603ULL;
+    while (*key) {
+        h ^= (unsigned char)*key++;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
 Store *store_create(void) {
-    return xcalloc(1, sizeof(Store));
+    Store *s   = xcalloc(1, sizeof(Store));
+    s->size    = STORE_INITIAL_BUCKETS;
+    s->buckets = xcalloc(s->size, sizeof(StoreEntry *));
+    return s;
+}
+
+static void store_grow(Store *store) {
+    size_t       new_size = store->size * 2;
+    StoreEntry **nb       = xcalloc(new_size, sizeof(StoreEntry *));
+    for (size_t i = 0; i < store->size; i++) {
+        StoreEntry *e = store->buckets[i];
+        while (e) {
+            StoreEntry *next = e->next;
+            size_t      slot = e->hash & (new_size - 1);
+            e->next  = nb[slot];
+            nb[slot] = e;
+            e = next;
+        }
+    }
+    free(store->buckets);
+    store->buckets = nb;
+    store->size    = new_size;
 }
 
 /* ---------- value lifetime ---------- */
@@ -88,11 +120,11 @@ static int entry_is_expired(const StoreEntry *entry, int64_t now) {
 /* Find a live entry. Expired entries are unlinked and freed on the way
    (lazy expiry), so a key never appears twice in a bucket chain. */
 static StoreEntry *lookup(Store *store, const char *key) {
-    unsigned int slot = hash_key(key, STORE_NUM_BUCKETS);
-    StoreEntry **curr = &store->buckets[slot];
+    uint64_t     h    = hash64(key);
+    StoreEntry **curr = &store->buckets[h & (store->size - 1)];
     while (*curr) {
         StoreEntry *e = *curr;
-        if (strcmp(e->key, key) == 0) {
+        if (e->hash == h && strcmp(e->key, key) == 0) {
             if (e->expires_at != 0 && entry_is_expired(e, now_ms())) {
                 *curr = e->next;
                 entry_free(e);
@@ -107,10 +139,12 @@ static StoreEntry *lookup(Store *store, const char *key) {
 }
 
 static StoreEntry *create_entry(Store *store, const char *key, StoreType type) {
-    unsigned int slot = hash_key(key, STORE_NUM_BUCKETS);
-    StoreEntry  *e    = xcalloc(1, sizeof(StoreEntry));
+    if (store->count >= store->size) store_grow(store);
+    StoreEntry *e = xcalloc(1, sizeof(StoreEntry));
     e->key  = xstrdup(key);
+    e->hash = hash64(key);
     e->type = type;
+    size_t slot = e->hash & (store->size - 1);
     e->next = store->buckets[slot];
     store->buckets[slot] = e;
     store->count++;
@@ -130,11 +164,11 @@ static StoreStatus lookup_typed(Store *store, const char *key, StoreType type, S
 /* ---------- keys ---------- */
 
 int store_del(Store *store, const char *key) {
-    unsigned int slot = hash_key(key, STORE_NUM_BUCKETS);
-    StoreEntry **curr = &store->buckets[slot];
+    uint64_t     h    = hash64(key);
+    StoreEntry **curr = &store->buckets[h & (store->size - 1)];
     while (*curr) {
         StoreEntry *e = *curr;
-        if (strcmp(e->key, key) == 0) {
+        if (e->hash == h && strcmp(e->key, key) == 0) {
             int live = !entry_is_expired(e, now_ms());
             *curr = e->next;
             entry_free(e);
@@ -168,7 +202,7 @@ int64_t store_get_expiry(Store *store, const char *key) {
 
 void store_scan(Store *store, void (*visit)(const StoreEntry *e, void *ctx), void *ctx) {
     int64_t now = now_ms();
-    for (int i = 0; i < STORE_NUM_BUCKETS; i++) {
+    for (size_t i = 0; i < store->size; i++) {
         for (StoreEntry *e = store->buckets[i]; e; e = e->next) {
             if (!entry_is_expired(e, now)) visit(e, ctx);
         }
@@ -544,7 +578,7 @@ StoreStatus store_get_stream(Store *store, const char *key, const Stream **strea
 
 void store_destroy(Store *store) {
     if (!store) return;
-    for (int i = 0; i < STORE_NUM_BUCKETS; i++) {
+    for (size_t i = 0; i < store->size; i++) {
         StoreEntry *e = store->buckets[i];
         while (e) {
             StoreEntry *next = e->next;
@@ -552,5 +586,6 @@ void store_destroy(Store *store) {
             e = next;
         }
     }
+    free(store->buckets);
     free(store);
 }
