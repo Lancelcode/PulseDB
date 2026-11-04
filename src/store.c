@@ -540,7 +540,7 @@ static int parse_u64(const char *s, size_t n, uint64_t *out) {
 }
 
 int stream_id_parse(const char *s, uint64_t default_seq, StreamId *out) {
-    const char *dash = strchr(s, '-');
+    const char *dash = (strchr)(s, '-');
     if (!dash) {
         if (parse_u64(s, strlen(s), &out->ms) < 0) return -1;
         out->seq = default_seq;

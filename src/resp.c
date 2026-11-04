@@ -177,7 +177,7 @@ static RespParseStatus parse_value(const char *buf, size_t len, size_t pos, int 
    mainly useful for manual testing with nc or telnet. */
 static RespParseStatus parse_inline(const char *buf, size_t len, size_t *consumed,
                                     RespValue **out) {
-    const char *nl = memchr(buf, '\n', len);
+    const char *nl = (memchr)(buf, '\n', len);
     if (!nl) return len > RESP_MAX_INLINE_LEN ? RESP_PARSE_ERROR : RESP_PARSE_INCOMPLETE;
 
     size_t line_len = (size_t)(nl - buf);
