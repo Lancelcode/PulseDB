@@ -35,8 +35,8 @@ static int start_server(const char *path) {
     char  line[256];
     server_port = 0;
     while (fgets(line, sizeof(line), out)) {
-        char *p = strstr(line, "listening on ");
-        if (p) { p = strrchr(p, ':'); server_port = atoi(p + 1); break; }
+        char *p = (strstr)(line, "listening on ");
+        if (p) { p = (strrchr)(p, ':'); server_port = atoi(p + 1); break; }
     }
     fclose(out);
     return server_port > 0 ? 0 : -1;
