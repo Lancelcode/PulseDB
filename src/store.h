@@ -39,11 +39,16 @@ typedef struct {
     double  score;
 } ZSetEntry;
 
-/* Sorted set: array ordered by (score, member). */
+struct ZIndexNode;
+
+/* Sorted set: an array ordered by (score, member) for range queries, plus
+   a hash index from member to score so lookups by name do not scan. */
 typedef struct {
-    ZSetEntry *entries;
-    size_t     len;
-    size_t     cap;
+    ZSetEntry          *entries;
+    size_t              len;
+    size_t              cap;
+    struct ZIndexNode **index;       /* buckets; members are borrowed from entries */
+    size_t              index_size;  /* power of two */
 } ZSet;
 
 typedef struct {
