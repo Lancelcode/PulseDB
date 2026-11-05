@@ -21,3 +21,11 @@ dump.rdb
 # OS files
 .DS_Store
 Thumbs.db
+# local tooling
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.mcp.json
+
+# build output
+build/
