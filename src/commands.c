@@ -1,894 +1,244 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <ctype.h>
-#include <limits.h>
-#include <sys/select.h>
 #include <fnmatch.h>
-#include "geo.h"
-#include "commands.h"
-#include "store.h"
+#include <stdio.h>
+#include <string.h>
+#include <strings.h>
 
-void send_simple(int fd, const char *msg) {
-    char buf[256];
-    snprintf(buf, sizeof(buf), "+%s\r\n", msg);
-    write(fd, buf, strlen(buf));
+#include "cmd.h"
+
+/* ---------- server commands ---------- */
+
+static int cmd_ping(CommandCtx *ctx) {
+    if (ARGC == 1) reply_simple(OUT, "PONG");
+    else if (ARGC == 2) reply_bulk(OUT, ARG(1), ctx->req->elements[1].len);
+    else reply_error(OUT, "ERR wrong number of arguments for 'ping' command");
+    return CMD_DONE;
 }
 
-void send_error(int fd, const char *msg) {
-    char buf[256];
-    snprintf(buf, sizeof(buf), "-ERR %s\r\n", msg);
-    write(fd, buf, strlen(buf));
+static int cmd_echo(CommandCtx *ctx) {
+    reply_bulk(OUT, ARG(1), ctx->req->elements[1].len);
+    return CMD_DONE;
 }
 
-void send_bulk(int fd, const char *msg) {
-    char header[64];
-    snprintf(header, sizeof(header), "$%zu\r\n", strlen(msg));
-    write(fd, header, strlen(header));
-    write(fd, msg, strlen(msg));
-    write(fd, "\r\n", 2);
-}
-
-void send_null(int fd) {
-    write(fd, "$-1\r\n", 5);
-}
-
-void send_integer(int fd, long val) {
-    char buf[64];
-    snprintf(buf, sizeof(buf), ":%ld\r\n", val);
-    write(fd, buf, strlen(buf));
-}
-
-static void send_array_header(int fd, int count) {
-    char buf[64];
-    snprintf(buf, sizeof(buf), "*%d\r\n", count);
-    write(fd, buf, strlen(buf));
-}
-
-static void str_toupper(char *s) {
-    for (; *s; s++) *s = toupper((unsigned char)*s);
-}
-
-static void cmd_ping(int fd, RespValue *cmd) {
-    if (cmd->count == 1) {
-        send_simple(fd, "PONG");
-    } else {
-        send_bulk(fd, cmd->elements[1].str);
+static int cmd_config(CommandCtx *ctx) {
+    if (strcasecmp(ARG(1), "GET") != 0) {
+        reply_errorf(OUT, "ERR unsupported CONFIG subcommand '%s'", ARG(1));
+        return CMD_DONE;
     }
-}
-
-static void cmd_echo(int fd, RespValue *cmd) {
-    if (cmd->count < 2) {
-        send_error(fd, "wrong number of arguments for 'echo'");
-        return;
+    if (ARGC != 3) {
+        reply_error(OUT, "ERR wrong number of arguments for 'config|get' command");
+        return CMD_DONE;
     }
-    send_bulk(fd, cmd->elements[1].str);
-}
-
-static void cmd_set(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 3) {
-        send_error(fd, "wrong number of arguments for 'set'");
-        return;
-    }
-
-    const char *key        = cmd->elements[1].str;
-    const char *value      = cmd->elements[2].str;
-    int64_t     expires_at = 0;
-
-    for (int i = 3; i < cmd->count - 1; i++) {
-        char opt[8];
-        snprintf(opt, sizeof(opt), "%s", cmd->elements[i].str);
-        str_toupper(opt);
-
-        if (strcmp(opt, "EX") == 0) {
-            long secs  = atol(cmd->elements[i + 1].str);
-            expires_at = now_ms() + secs * 1000;
-            i++;
-        } else if (strcmp(opt, "PX") == 0) {
-            long ms    = atol(cmd->elements[i + 1].str);
-            expires_at = now_ms() + ms;
-            i++;
-        }
-    }
-
-    store_set_with_expiry(store, key, value, expires_at);
-    send_simple(fd, "OK");
-}
-
-static void cmd_get(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 2) {
-        send_error(fd, "wrong number of arguments for 'get'");
-        return;
-    }
-    char *value = store_get(store, cmd->elements[1].str);
-    if (value) {
-        send_bulk(fd, value);
-    } else {
-        send_null(fd);
-    }
-}
-
-static void cmd_ttl(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 2) {
-        send_error(fd, "wrong number of arguments for 'ttl'");
-        return;
-    }
-    int64_t expiry = store_get_expiry(store, cmd->elements[1].str);
-    if (expiry == -2) {
-        send_integer(fd, -2);
-    } else if (expiry == -1) {
-        send_integer(fd, -1);
-    } else {
-        long secs = (long)((expiry - now_ms()) / 1000);
-        send_integer(fd, secs < 0 ? -2 : secs);
-    }
-}
-
-static void cmd_pttl(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 2) {
-        send_error(fd, "wrong number of arguments for 'pttl'");
-        return;
-    }
-    int64_t expiry = store_get_expiry(store, cmd->elements[1].str);
-    if (expiry == -2) {
-        send_integer(fd, -2);
-    } else if (expiry == -1) {
-        send_integer(fd, -1);
-    } else {
-        long ms = (long)(expiry - now_ms());
-        send_integer(fd, ms < 0 ? -2 : ms);
-    }
-}
-
-static void cmd_del(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 2) {
-        send_error(fd, "wrong number of arguments for 'del'");
-        return;
-    }
-    int deleted = 0;
-    for (int i = 1; i < cmd->count; i++) {
-        deleted += store_del(store, cmd->elements[i].str);
-    }
-    send_integer(fd, deleted);
-}
-
-static void cmd_exists(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 2) {
-        send_error(fd, "wrong number of arguments for 'exists'");
-        return;
-    }
-    int found = 0;
-    for (int i = 1; i < cmd->count; i++) {
-        found += store_exists(store, cmd->elements[i].str);
-    }
-    send_integer(fd, found);
-}
-
-static void cmd_type(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 2) {
-        send_error(fd, "wrong number of arguments for 'type'");
-        return;
-    }
-    StoreType t = store_type(store, cmd->elements[1].str);
-    if (t == STORE_TYPE_STRING) {
-        send_simple(fd, "string");
-    } else if (t == STORE_TYPE_LIST) {
-        send_simple(fd, "list");
-    } else if (t == STORE_TYPE_HASH) {
-        send_simple(fd, "hash");
-    } else if (t == STORE_TYPE_ZSET) {
-        send_simple(fd, "zset");
-    } else if (t == STORE_TYPE_STREAM) {
-        send_simple(fd, "stream");
-    } else {
-        send_simple(fd, "none");
-    }
-}
-
-static void cmd_incrby(int fd, RespValue *cmd, Store *store, int64_t delta_override, int use_override) {
-    if (cmd->count < 2) {
-        send_error(fd, "wrong number of arguments");
-        return;
-    }
-    int64_t delta  = use_override ? delta_override : atoll(cmd->elements[2].str);
-    int64_t result = store_incrby(store, cmd->elements[1].str, delta);
-    if (result == LLONG_MIN) {
-        send_error(fd, "value is not an integer or out of range");
-        return;
-    }
-    send_integer(fd, (long)result);
-}
-
-static void cmd_lpush(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 3) { send_error(fd, "wrong number of arguments for 'lpush'"); return; }
-    const char *key = cmd->elements[1].str;
-    int len = 0;
-    for (int i = 2; i < cmd->count; i++) {
-        len = store_lpush(store, key, cmd->elements[i].str);
-        if (len < 0) { send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value"); return; }
-    }
-    send_integer(fd, len);
-}
-
-static void cmd_rpush(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 3) { send_error(fd, "wrong number of arguments for 'rpush'"); return; }
-    const char *key = cmd->elements[1].str;
-    int len = 0;
-    for (int i = 2; i < cmd->count; i++) {
-        len = store_rpush(store, key, cmd->elements[i].str);
-        if (len < 0) { send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value"); return; }
-    }
-    send_integer(fd, len);
-}
-
-static void cmd_lpop(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 2) { send_error(fd, "wrong number of arguments for 'lpop'"); return; }
-    char *value = store_lpop(store, cmd->elements[1].str);
-    if (value) { send_bulk(fd, value); free(value); } else { send_null(fd); }
-}
-
-static void cmd_rpop(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 2) { send_error(fd, "wrong number of arguments for 'rpop'"); return; }
-    char *value = store_rpop(store, cmd->elements[1].str);
-    if (value) { send_bulk(fd, value); free(value); } else { send_null(fd); }
-}
-
-static void cmd_llen(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 2) { send_error(fd, "wrong number of arguments for 'llen'"); return; }
-    int len = store_llen(store, cmd->elements[1].str);
-    if (len < 0) { send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value"); return; }
-    send_integer(fd, len);
-}
-
-static void cmd_lrange(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 4) { send_error(fd, "wrong number of arguments for 'lrange'"); return; }
-    List *list = store_get_list(store, cmd->elements[1].str);
-    if (!list) { send_array_header(fd, 0); return; }
-    int len   = list->len;
-    int start = atoi(cmd->elements[2].str);
-    int stop  = atoi(cmd->elements[3].str);
-    if (start < 0) start = len + start;
-    if (stop  < 0) stop  = len + stop;
-    if (start < 0) start = 0;
-    if (stop  >= len) stop = len - 1;
-    if (start > stop) { send_array_header(fd, 0); return; }
-    int count = stop - start + 1;
-    send_array_header(fd, count);
-    ListNode *node = list->head;
-    for (int i = 0; i < start && node; i++) node = node->next;
-    for (int i = 0; i < count && node; i++) { send_bulk(fd, node->value); node = node->next; }
-}
-
-static void cmd_blpop(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 3) { send_error(fd, "wrong number of arguments for 'blpop'"); return; }
-    double  timeout_secs = atof(cmd->elements[cmd->count - 1].str);
-    int64_t deadline     = timeout_secs > 0 ? now_ms() + (int64_t)(timeout_secs * 1000) : 0;
-    int num_keys = cmd->count - 2;
-    while (1) {
-        for (int i = 1; i <= num_keys; i++) {
-            const char *key = cmd->elements[i].str;
-            char *value     = store_lpop(store, key);
-            if (value) { send_array_header(fd, 2); send_bulk(fd, key); send_bulk(fd, value); free(value); return; }
-        }
-        if (deadline > 0 && now_ms() >= deadline) { send_null(fd); return; }
-        struct timeval tv; tv.tv_sec = 0; tv.tv_usec = 100000;
-        select(0, NULL, NULL, NULL, &tv);
-    }
-}
-
-static void cmd_hset(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 4 || (cmd->count % 2) != 0) { send_error(fd, "wrong number of arguments for 'hset'"); return; }
-    const char *key = cmd->elements[1].str;
-    int added = 0;
-    for (int i = 2; i < cmd->count - 1; i += 2) {
-        int result = store_hset(store, key, cmd->elements[i].str, cmd->elements[i + 1].str);
-        if (result < 0) { send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value"); return; }
-        added += result;
-    }
-    send_integer(fd, added);
-}
-
-static void cmd_hget(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 3) { send_error(fd, "wrong number of arguments for 'hget'"); return; }
-    char *value = store_hget(store, cmd->elements[1].str, cmd->elements[2].str);
-    if (value) { send_bulk(fd, value); } else { send_null(fd); }
-}
-
-static void cmd_hgetall(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 2) { send_error(fd, "wrong number of arguments for 'hgetall'"); return; }
-    Hash *hash = store_get_hash(store, cmd->elements[1].str);
-    if (!hash) { send_array_header(fd, 0); return; }
-    send_array_header(fd, hash->len * 2);
-    for (int i = 0; i < HASH_NUM_BUCKETS; i++) {
-        HashField *hf = hash->buckets[i];
-        while (hf) { send_bulk(fd, hf->field); send_bulk(fd, hf->value); hf = hf->next; }
-    }
-}
-
-static void cmd_hmget(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 3) { send_error(fd, "wrong number of arguments for 'hmget'"); return; }
-    send_array_header(fd, cmd->count - 2);
-    for (int i = 2; i < cmd->count; i++) {
-        char *value = store_hget(store, cmd->elements[1].str, cmd->elements[i].str);
-        if (value) { send_bulk(fd, value); } else { send_null(fd); }
-    }
-}
-
-static void cmd_hdel(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 3) { send_error(fd, "wrong number of arguments for 'hdel'"); return; }
-    int deleted = 0;
-    for (int i = 2; i < cmd->count; i++) deleted += store_hdel(store, cmd->elements[1].str, cmd->elements[i].str);
-    send_integer(fd, deleted);
-}
-
-static void cmd_hlen(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 2) { send_error(fd, "wrong number of arguments for 'hlen'"); return; }
-    send_integer(fd, store_hlen(store, cmd->elements[1].str));
-}
-
-static void cmd_zadd(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 4 || (cmd->count % 2) != 0) { send_error(fd, "wrong number of arguments for 'zadd'"); return; }
-    const char *key = cmd->elements[1].str;
-    int added = 0;
-    for (int i = 2; i < cmd->count - 1; i += 2) {
-        double score = atof(cmd->elements[i].str);
-        int result   = store_zadd(store, key, score, cmd->elements[i + 1].str);
-        if (result < 0) { send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value"); return; }
-        added += result;
-    }
-    send_integer(fd, added);
-}
-
-static void cmd_zrange(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 4) { send_error(fd, "wrong number of arguments for 'zrange'"); return; }
-    ZSet *zset = store_get_zset(store, cmd->elements[1].str);
-    if (!zset) { send_array_header(fd, 0); return; }
-    int len   = zset->len;
-    int start = atoi(cmd->elements[2].str);
-    int stop  = atoi(cmd->elements[3].str);
-    if (start < 0) start = len + start;
-    if (stop  < 0) stop  = len + stop;
-    if (start < 0) start = 0;
-    if (stop  >= len) stop = len - 1;
-    if (start > stop) { send_array_header(fd, 0); return; }
-    int withscores = 0;
-    if (cmd->count > 4) {
-        char opt[16];
-        snprintf(opt, sizeof(opt), "%s", cmd->elements[4].str);
-        str_toupper(opt);
-        if (strcmp(opt, "WITHSCORES") == 0) withscores = 1;
-    }
-    int count = stop - start + 1;
-    send_array_header(fd, withscores ? count * 2 : count);
-    for (int i = start; i <= stop; i++) {
-        send_bulk(fd, zset->entries[i].member);
-        if (withscores) {
-            char score_buf[64];
-            snprintf(score_buf, sizeof(score_buf), "%g", zset->entries[i].score);
-            send_bulk(fd, score_buf);
-        }
-    }
-}
-
-static void cmd_zrank(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 3) { send_error(fd, "wrong number of arguments for 'zrank'"); return; }
-    int rank = store_zrank(store, cmd->elements[1].str, cmd->elements[2].str);
-    if (rank < 0) { send_null(fd); } else { send_integer(fd, rank); }
-}
-
-static void cmd_zcard(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 2) { send_error(fd, "wrong number of arguments for 'zcard'"); return; }
-    send_integer(fd, store_zcard(store, cmd->elements[1].str));
-}
-
-static void cmd_zscore(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 3) { send_error(fd, "wrong number of arguments for 'zscore'"); return; }
-    int found = 0;
-    double score = store_zscore(store, cmd->elements[1].str, cmd->elements[2].str, &found);
-    if (!found) { send_null(fd); } else {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "%g", score);
-        send_bulk(fd, buf);
-    }
-}
-
-static void cmd_zrangebyscore(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 4) { send_error(fd, "wrong number of arguments for 'zrangebyscore'"); return; }
-    ZSet *zset = store_get_zset(store, cmd->elements[1].str);
-    if (!zset) { send_array_header(fd, 0); return; }
-    double min = atof(cmd->elements[2].str);
-    double max = atof(cmd->elements[3].str);
-    int count = 0;
-    for (int i = 0; i < zset->len; i++) {
-        if (zset->entries[i].score >= min && zset->entries[i].score <= max) count++;
-    }
-    send_array_header(fd, count);
-    for (int i = 0; i < zset->len; i++) {
-        if (zset->entries[i].score >= min && zset->entries[i].score <= max) {
-            send_bulk(fd, zset->entries[i].member);
-        }
-    }
-}
-
-static void cmd_config_get(int fd, RespValue *cmd, Config *cfg) {
-    if (cmd->count < 3) { send_error(fd, "wrong number of arguments for 'config get'"); return; }
-
-    const char *pattern  = cmd->elements[2].str;
-    const char *keys[]   = { "port", "hz", "loglevel", "dir", "dbfilename" };
-    const char *values[5];
+    const Config *cfg = ctx->srv->cfg;
     char port_str[16], hz_str[16];
-
     snprintf(port_str, sizeof(port_str), "%d", cfg->port);
     snprintf(hz_str,   sizeof(hz_str),   "%d", cfg->hz);
 
-    values[0] = port_str;
-    values[1] = hz_str;
-    values[2] = cfg->loglevel;
-    values[3] = cfg->dir;
-    values[4] = cfg->dbfilename;
+    const char *keys[]   = { "port", "hz", "bind", "loglevel", "dir", "dbfilename" };
+    const char *values[] = { port_str, hz_str, cfg->bind, cfg->loglevel, cfg->dir, cfg->dbfilename };
+    const size_t n = sizeof(keys) / sizeof(keys[0]);
 
-    int count = 0;
-    for (int i = 0; i < 5; i++) {
-        if (fnmatch(pattern, keys[i], 0) == 0) count++;
-    }
-
-    send_array_header(fd, count * 2);
-
-    for (int i = 0; i < 5; i++) {
-        if (fnmatch(pattern, keys[i], 0) == 0) {
-            send_bulk(fd, keys[i]);
-            send_bulk(fd, values[i]);
+    size_t count = 0;
+    for (size_t i = 0; i < n; i++) if (fnmatch(ARG(2), keys[i], 0) == 0) count++;
+    reply_array(OUT, count * 2);
+    for (size_t i = 0; i < n; i++) {
+        if (fnmatch(ARG(2), keys[i], 0) == 0) {
+            reply_bulk_cstr(OUT, keys[i]);
+            reply_bulk_cstr(OUT, values[i]);
         }
+    }
+    return CMD_DONE;
+}
+
+/* ---------- command table ---------- */
+
+typedef enum { KIND_NORMAL, KIND_MULTI, KIND_EXEC, KIND_DISCARD } CommandKind;
+
+typedef struct {
+    const char *name;
+    int         arity;  /* > 0: exact argc; < 0: at least -arity (argc includes the name) */
+    CommandProc proc;
+    CommandKind kind;
+} CommandSpec;
+
+static const CommandSpec command_table[] = {
+    { "ping",          -1, cmd_ping, KIND_NORMAL },
+    { "echo",           2, cmd_echo, KIND_NORMAL },
+    { "config",        -2, cmd_config, KIND_NORMAL },
+    { "keys",           2, cmd_keys, KIND_NORMAL },
+    { "set",           -3, cmd_set, KIND_NORMAL },
+    { "get",            2, cmd_get, KIND_NORMAL },
+    { "incr",           2, cmd_incr, KIND_NORMAL },
+    { "decr",           2, cmd_decr, KIND_NORMAL },
+    { "incrby",         3, cmd_incrby, KIND_NORMAL },
+    { "decrby",         3, cmd_decrby, KIND_NORMAL },
+    { "del",           -2, cmd_del, KIND_NORMAL },
+    { "exists",        -2, cmd_exists, KIND_NORMAL },
+    { "type",           2, cmd_type, KIND_NORMAL },
+    { "ttl",            2, cmd_ttl, KIND_NORMAL },
+    { "pttl",           2, cmd_pttl, KIND_NORMAL },
+    { "lpush",         -3, cmd_lpush, KIND_NORMAL },
+    { "rpush",         -3, cmd_rpush, KIND_NORMAL },
+    { "lpop",           2, cmd_lpop, KIND_NORMAL },
+    { "rpop",           2, cmd_rpop, KIND_NORMAL },
+    { "llen",           2, cmd_llen, KIND_NORMAL },
+    { "lrange",         4, cmd_lrange, KIND_NORMAL },
+    { "blpop",         -3, cmd_blpop, KIND_NORMAL },
+    { "hset",          -4, cmd_hset, KIND_NORMAL },
+    { "hget",           3, cmd_hget, KIND_NORMAL },
+    { "hgetall",        2, cmd_hgetall, KIND_NORMAL },
+    { "hmget",         -3, cmd_hmget, KIND_NORMAL },
+    { "hdel",          -3, cmd_hdel, KIND_NORMAL },
+    { "hlen",           2, cmd_hlen, KIND_NORMAL },
+    { "zadd",          -4, cmd_zadd, KIND_NORMAL },
+    { "zrange",        -4, cmd_zrange, KIND_NORMAL },
+    { "zrangebyscore",  4, cmd_zrangebyscore, KIND_NORMAL },
+    { "zrank",          3, cmd_zrank, KIND_NORMAL },
+    { "zcard",          2, cmd_zcard, KIND_NORMAL },
+    { "zscore",         3, cmd_zscore, KIND_NORMAL },
+    { "geoadd",        -5, cmd_geoadd, KIND_NORMAL },
+    { "geodist",       -4, cmd_geodist, KIND_NORMAL },
+    { "geopos",        -3, cmd_geopos, KIND_NORMAL },
+    { "xadd",          -5, cmd_xadd, KIND_NORMAL },
+    { "xrange",         4, cmd_xrange, KIND_NORMAL },
+    { "xread",         -4, cmd_xread, KIND_NORMAL },
+    { "multi",          1, NULL, KIND_MULTI },
+    { "exec",           1, NULL, KIND_EXEC },
+    { "discard",        1, NULL, KIND_DISCARD },
+};
+
+#define NUM_COMMANDS      (sizeof(command_table) / sizeof(command_table[0]))
+#define LOOKUP_SLOTS      128   /* power of two, comfortably above NUM_COMMANDS */
+#define MAX_COMMAND_NAME  32
+
+/* Open-addressing table from lower-cased command name to spec, built on
+   first use. Replaces a linear strcasecmp scan of the whole table, which
+   showed up as a hot spot when profiling small pipelined requests. */
+static const CommandSpec *lookup_slots[LOOKUP_SLOTS];
+
+static unsigned name_hash(const char *s) {
+    unsigned h = 2166136261u;
+    for (; *s; s++) { h ^= (unsigned char)*s; h *= 16777619u; }
+    return h;
+}
+
+static void build_lookup(void) {
+    for (size_t i = 0; i < NUM_COMMANDS; i++) {
+        unsigned slot = name_hash(command_table[i].name) & (LOOKUP_SLOTS - 1);
+        while (lookup_slots[slot]) slot = (slot + 1) & (LOOKUP_SLOTS - 1);
+        lookup_slots[slot] = &command_table[i];
     }
 }
 
-static void cmd_keys(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 2) { send_error(fd, "wrong number of arguments for 'keys'"); return; }
+static const CommandSpec *command_lookup(const char *name) {
+    static int built = 0;
+    if (!built) { build_lookup(); built = 1; }
 
-    const char *pattern = cmd->elements[1].str;
-    int count = 0;
-
-    for (int i = 0; i < STORE_NUM_BUCKETS; i++) {
-        StoreEntry *entry = store->buckets[i];
-        while (entry) {
-            if (fnmatch(pattern, entry->key, 0) == 0) count++;
-            entry = entry->next;
-        }
+    char   lower[MAX_COMMAND_NAME];
+    size_t n = 0;
+    for (; name[n]; n++) {
+        if (n + 1 >= sizeof(lower)) return NULL;  /* longer than any command */
+        char c = name[n];
+        lower[n] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
     }
+    lower[n] = '\0';
 
-    send_array_header(fd, count);
-
-    for (int i = 0; i < STORE_NUM_BUCKETS; i++) {
-        StoreEntry *entry = store->buckets[i];
-        while (entry) {
-            if (fnmatch(pattern, entry->key, 0) == 0) send_bulk(fd, entry->key);
-            entry = entry->next;
-        }
+    unsigned slot = name_hash(lower) & (LOOKUP_SLOTS - 1);
+    while (lookup_slots[slot]) {
+        if (strcmp(lookup_slots[slot]->name, lower) == 0) return lookup_slots[slot];
+        slot = (slot + 1) & (LOOKUP_SLOTS - 1);
     }
+    return NULL;
 }
 
-static void cmd_xadd(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 5 || (cmd->count % 2) == 0) {
-        send_error(fd, "wrong number of arguments for 'xadd'");
-        return;
-    }
-
-    const char *key      = cmd->elements[1].str;
-    const char *id       = cmd->elements[2].str;
-    int num_fields       = (cmd->count - 3) / 2;
-    const char **fields  = malloc(num_fields * sizeof(char *));
-    const char **values  = malloc(num_fields * sizeof(char *));
-
-    for (int i = 0; i < num_fields; i++) {
-        fields[i] = cmd->elements[3 + i * 2].str;
-        values[i] = cmd->elements[4 + i * 2].str;
-    }
-
-    char *generated_id = store_xadd(store, key, id, fields, values, num_fields);
-    free(fields);
-    free(values);
-
-    if (!generated_id) {
-        send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value");
-        return;
-    }
-
-    send_bulk(fd, generated_id);
-    free(generated_id);
+static int arity_ok(const CommandSpec *spec, size_t argc) {
+    return spec->arity > 0 ? argc == (size_t)spec->arity : argc >= (size_t)(-spec->arity);
 }
 
-static void send_stream_entry(int fd, StreamEntry *entry) {
-    char id_buf[64];
-    snprintf(id_buf, sizeof(id_buf), "%llu-%llu",
-             (unsigned long long)entry->ms,
-             (unsigned long long)entry->seq);
-
-    send_array_header(fd, 2);
-    send_bulk(fd, id_buf);
-
-    int count = 0;
-    StreamField *f = entry->fields;
-    while (f) { count++; f = f->next; }
-
-    send_array_header(fd, count * 2);
-
-    f = entry->fields;
-    while (f) {
-        send_bulk(fd, f->field);
-        send_bulk(fd, f->value);
-        f = f->next;
+/* Check name, arity and argument encoding. Writes an error and returns
+   NULL if the request cannot be executed. */
+static const CommandSpec *validate(Client *c, RespValue *req) {
+    const char *name = req->elements[0].str;
+    const CommandSpec *spec = command_lookup(name);
+    if (!spec) {
+        reply_errorf(&c->out, "ERR unknown command '%.64s'", name);
+        return NULL;
     }
-}
-
-static void cmd_xrange(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 4) { send_error(fd, "wrong number of arguments for 'xrange'"); return; }
-
-    Stream *stream = store_get_stream(store, cmd->elements[1].str);
-    if (!stream) { send_array_header(fd, 0); return; }
-
-    const char *start_str = cmd->elements[2].str;
-    const char *end_str   = cmd->elements[3].str;
-
-    uint64_t start_ms = 0, start_seq = 0;
-    uint64_t end_ms   = UINT64_MAX, end_seq = UINT64_MAX;
-
-    if (strcmp(start_str, "-") != 0) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "%s", start_str);
-        char *dash = strchr(buf, '-');
-        if (dash) { *dash = '\0'; start_ms = strtoull(buf, NULL, 10); start_seq = strtoull(dash + 1, NULL, 10); }
-        else { start_ms = strtoull(buf, NULL, 10); start_seq = 0; }
+    if (!arity_ok(spec, req->count)) {
+        reply_errorf(&c->out, "ERR wrong number of arguments for '%s' command", spec->name);
+        return NULL;
     }
-
-    if (strcmp(end_str, "+") != 0) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "%s", end_str);
-        char *dash = strchr(buf, '-');
-        if (dash) { *dash = '\0'; end_ms = strtoull(buf, NULL, 10); end_seq = strtoull(dash + 1, NULL, 10); }
-        else { end_ms = strtoull(buf, NULL, 10); end_seq = UINT64_MAX; }
-    }
-
-    int count = 0;
-    StreamEntry *entry = stream->head;
-    while (entry) {
-        if ((entry->ms > start_ms || (entry->ms == start_ms && entry->seq >= start_seq)) &&
-            (entry->ms < end_ms   || (entry->ms == end_ms   && entry->seq <= end_seq))) {
-            count++;
-        }
-        entry = entry->next;
-    }
-
-    send_array_header(fd, count);
-
-    entry = stream->head;
-    while (entry) {
-        if ((entry->ms > start_ms || (entry->ms == start_ms && entry->seq >= start_seq)) &&
-            (entry->ms < end_ms   || (entry->ms == end_ms   && entry->seq <= end_seq))) {
-            send_stream_entry(fd, entry);
-        }
-        entry = entry->next;
-    }
-}
-
-static void cmd_xread(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 4) { send_error(fd, "wrong number of arguments for 'xread'"); return; }
-
-    int arg_idx = 1;
-    int count   = 0;
-
-    char opt[16];
-    snprintf(opt, sizeof(opt), "%s", cmd->elements[arg_idx].str);
-    str_toupper(opt);
-
-    if (strcmp(opt, "COUNT") == 0) {
-        count   = atoi(cmd->elements[arg_idx + 1].str);
-        arg_idx += 2;
-    }
-
-    snprintf(opt, sizeof(opt), "%s", cmd->elements[arg_idx].str);
-    str_toupper(opt);
-    if (strcmp(opt, "STREAMS") != 0) { send_error(fd, "syntax error"); return; }
-    arg_idx++;
-
-    int num_keys = (cmd->count - arg_idx) / 2;
-    if (num_keys < 1) { send_error(fd, "syntax error"); return; }
-
-    send_array_header(fd, num_keys);
-
-    for (int k = 0; k < num_keys; k++) {
-        const char *key      = cmd->elements[arg_idx + k].str;
-        const char *id_start = cmd->elements[arg_idx + num_keys + k].str;
-
-        uint64_t start_ms = 0, start_seq = 0;
-
-        if (strcmp(id_start, "0") != 0 && strcmp(id_start, "0-0") != 0) {
-            char buf[128];
-            snprintf(buf, sizeof(buf), "%s", id_start);
-            char *dash = strchr(buf, '-');
-            if (dash) { *dash = '\0'; start_ms = strtoull(buf, NULL, 10); start_seq = strtoull(dash + 1, NULL, 10) + 1; }
-            else { start_ms = strtoull(buf, NULL, 10); start_seq = 0; }
-        }
-
-        Stream *stream = store_get_stream(store, key);
-        send_array_header(fd, 2);
-        send_bulk(fd, key);
-
-        if (!stream) { send_array_header(fd, 0); continue; }
-
-        int matched = 0;
-        StreamEntry *entry = stream->head;
-        while (entry) {
-            if (entry->ms > start_ms || (entry->ms == start_ms && entry->seq >= start_seq)) matched++;
-            entry = entry->next;
-        }
-
-        if (count > 0 && matched > count) matched = count;
-        send_array_header(fd, matched);
-
-        int sent = 0;
-        entry = stream->head;
-        while (entry && (count == 0 || sent < count)) {
-            if (entry->ms > start_ms || (entry->ms == start_ms && entry->seq >= start_seq)) {
-                send_stream_entry(fd, entry);
-                sent++;
-            }
-            entry = entry->next;
+    /* Keys and values are stored as C strings, so reject embedded NULs
+       rather than silently truncating them. */
+    for (size_t i = 0; i < req->count; i++) {
+        if (strlen(req->elements[i].str) != req->elements[i].len) {
+            reply_error(&c->out, "ERR arguments containing NUL bytes are not supported");
+            return NULL;
         }
     }
+    return spec;
 }
 
-static void cmd_multi(int fd, Txn *txn) {
-    if (txn->active) { send_error(fd, "MULTI calls can not be nested"); return; }
-    txn->active = 1;
-    send_simple(fd, "OK");
+static int run(const CommandSpec *spec, Server *srv, Client *c, RespValue *req, int can_block, int timed_out) {
+    CommandCtx ctx = { srv, c, req, can_block, timed_out };
+    return spec->proc(&ctx);
 }
 
-static void cmd_discard(int fd, Txn *txn) {
-    if (!txn->active) { send_error(fd, "DISCARD without MULTI"); return; }
-    txn_reset(txn);
-    send_simple(fd, "OK");
-}
-
-static void cmd_exec(int fd, RespValue *cmd, Store *store, Config *cfg, Txn *txn) {
-    (void)cmd;
-    if (!txn->active) { send_error(fd, "EXEC without MULTI"); return; }
-
+static void exec_transaction(Server *srv, Client *c) {
+    Txn *txn = &c->txn;
     if (txn->error) {
         txn_reset(txn);
-        send_error(fd, "EXECABORT Transaction discarded because of previous errors");
+        reply_error(&c->out, "EXECABORT Transaction discarded because of previous errors.");
         return;
     }
-
-    send_array_header(fd, txn->count);
-
+    reply_array(&c->out, (size_t)txn->count);
     for (int i = 0; i < txn->count; i++) {
-        command_dispatch(fd, txn->cmds[i], store, cfg, NULL);
+        RespValue *req = txn->cmds[i];
+        run(command_lookup(req->elements[0].str), srv, c, req, 0, 0);
     }
-
     txn_reset(txn);
 }
 
-static void cmd_geoadd(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 5 || ((cmd->count - 2) % 3) != 0) {
-        send_error(fd, "wrong number of arguments for 'geoadd'");
-        return;
+CommandResult command_process(Server *srv, Client *c, RespValue *req) {
+    Txn               *txn  = &c->txn;
+    const CommandSpec *spec = validate(c, req);
+    if (!spec) {
+        /* A command rejected while queuing poisons the transaction, so
+           EXEC later fails as a whole instead of running half of it. */
+        if (txn->active) txn->error = 1;
+        return CMD_RESULT_DONE;
     }
 
-    const char *key = cmd->elements[1].str;
-    int added       = 0;
+    switch (spec->kind) {
+    case KIND_MULTI:
+        if (txn->active) reply_error(&c->out, "ERR MULTI calls can not be nested");
+        else { txn->active = 1; reply_simple(&c->out, "OK"); }
+        return CMD_RESULT_DONE;
+    case KIND_EXEC:
+        if (!txn->active) reply_error(&c->out, "ERR EXEC without MULTI");
+        else exec_transaction(srv, c);
+        return CMD_RESULT_DONE;
+    case KIND_DISCARD:
+        if (!txn->active) reply_error(&c->out, "ERR DISCARD without MULTI");
+        else { txn_reset(txn); reply_simple(&c->out, "OK"); }
+        return CMD_RESULT_DONE;
+    case KIND_NORMAL:
+        break;
+    }
 
-    for (int i = 2; i < cmd->count - 2; i += 3) {
-        double lng         = atof(cmd->elements[i].str);
-        double lat         = atof(cmd->elements[i + 1].str);
-        const char *member = cmd->elements[i + 2].str;
-
-        if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-            send_error(fd, "invalid longitude or latitude");
-            return;
+    if (txn->active) {
+        if (txn_queue(txn, req) < 0) {
+            txn->error = 1;
+            reply_error(&c->out, "ERR transaction queue is full");
+            return CMD_RESULT_DONE;
         }
-
-        double score = (double)geo_encode(lat, lng);
-        int result   = store_zadd(store, key, score, member);
-        if (result < 0) { send_error(fd, "WRONGTYPE operation against a key holding the wrong kind of value"); return; }
-        added += result;
+        reply_simple(&c->out, "QUEUED");
+        return CMD_RESULT_QUEUED;
     }
 
-    send_integer(fd, added);
+    return run(spec, srv, c, req, 1, 0) == CMD_BLOCK ? CMD_RESULT_BLOCKED : CMD_RESULT_DONE;
 }
 
-static void cmd_geodist(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 4) { send_error(fd, "wrong number of arguments for 'geodist'"); return; }
-
-    const char *key     = cmd->elements[1].str;
-    const char *member1 = cmd->elements[2].str;
-    const char *member2 = cmd->elements[3].str;
-    const char *unit    = cmd->count > 4 ? cmd->elements[4].str : "m";
-
-    int found1 = 0, found2 = 0;
-    double score1 = store_zscore(store, key, member1, &found1);
-    double score2 = store_zscore(store, key, member2, &found2);
-
-    if (!found1 || !found2) { send_null(fd); return; }
-
-    double lat1, lng1, lat2, lng2;
-    geo_decode((uint64_t)score1, &lat1, &lng1);
-    geo_decode((uint64_t)score2, &lat2, &lng2);
-
-    double dist_m  = geo_distance_m(lat1, lng1, lat2, lng2);
-    double result  = dist_m;
-
-    char unit_upper[8];
-    snprintf(unit_upper, sizeof(unit_upper), "%s", unit);
-    str_toupper(unit_upper);
-
-    if      (strcmp(unit_upper, "KM") == 0) result = dist_m / 1000.0;
-    else if (strcmp(unit_upper, "MI") == 0) result = dist_m / 1609.344;
-    else if (strcmp(unit_upper, "FT") == 0) result = dist_m * 3.28084;
-
-    char buf[64];
-    snprintf(buf, sizeof(buf), "%.4f", result);
-    send_bulk(fd, buf);
-}
-
-static void cmd_geopos(int fd, RespValue *cmd, Store *store) {
-    if (cmd->count < 3) { send_error(fd, "wrong number of arguments for 'geopos'"); return; }
-
-    int num_members = cmd->count - 2;
-    send_array_header(fd, num_members);
-
-    for (int i = 2; i < cmd->count; i++) {
-        int    found = 0;
-        double score = store_zscore(store, cmd->elements[1].str, cmd->elements[i].str, &found);
-
-        if (!found) {
-            send_null(fd);
-        } else {
-            double lat, lng;
-            geo_decode((uint64_t)score, &lat, &lng);
-            send_array_header(fd, 2);
-            char lng_buf[32], lat_buf[32];
-            snprintf(lng_buf, sizeof(lng_buf), "%.17g", lng);
-            snprintf(lat_buf, sizeof(lat_buf), "%.17g", lat);
-            send_bulk(fd, lng_buf);
-            send_bulk(fd, lat_buf);
-        }
-    }
-}
-
-void command_dispatch(int fd, RespValue *cmd, Store *store, Config *cfg, Txn *txn) {
-    if (!cmd || cmd->type != RESP_ARRAY || cmd->count < 1) {
-        send_error(fd, "invalid command");
-        return;
-    }
-
-    char name[64];
-    snprintf(name, sizeof(name), "%s", cmd->elements[0].str);
-    str_toupper(name);
-
-    if (strcmp(name, "MULTI") == 0) {
-        cmd_multi(fd, txn);
-        return;
-    } else if (strcmp(name, "EXEC") == 0) {
-        cmd_exec(fd, cmd, store, cfg, txn);
-        return;
-    } else if (strcmp(name, "DISCARD") == 0) {
-        cmd_discard(fd, txn);
-        return;
-    }
-
-    if (txn && txn->active) {
-        RespValue *copy    = malloc(sizeof(RespValue));
-        *copy              = *cmd;
-        copy->elements     = malloc(cmd->count * sizeof(RespValue));
-        memcpy(copy->elements, cmd->elements, cmd->count * sizeof(RespValue));
-        for (int i = 0; i < cmd->count; i++) {
-            if (cmd->elements[i].str) copy->elements[i].str = strdup(cmd->elements[i].str);
-        }
-        if (txn_queue(txn, copy) < 0) {
-            send_error(fd, "ERR transaction queue full");
-        } else {
-            send_simple(fd, "QUEUED");
-        }
-        return;
-    }
-
-    if (strcmp(name, "PING") == 0) {
-        cmd_ping(fd, cmd);
-    } else if (strcmp(name, "ECHO") == 0) {
-        cmd_echo(fd, cmd);
-    } else if (strcmp(name, "SET") == 0) {
-        cmd_set(fd, cmd, store);
-    } else if (strcmp(name, "GET") == 0) {
-        cmd_get(fd, cmd, store);
-    } else if (strcmp(name, "TTL") == 0) {
-        cmd_ttl(fd, cmd, store);
-    } else if (strcmp(name, "PTTL") == 0) {
-        cmd_pttl(fd, cmd, store);
-    } else if (strcmp(name, "DEL") == 0) {
-        cmd_del(fd, cmd, store);
-    } else if (strcmp(name, "EXISTS") == 0) {
-        cmd_exists(fd, cmd, store);
-    } else if (strcmp(name, "TYPE") == 0) {
-        cmd_type(fd, cmd, store);
-    } else if (strcmp(name, "INCR") == 0) {
-        cmd_incrby(fd, cmd, store, 1, 1);
-    } else if (strcmp(name, "DECR") == 0) {
-        cmd_incrby(fd, cmd, store, -1, 1);
-    } else if (strcmp(name, "INCRBY") == 0) {
-        cmd_incrby(fd, cmd, store, 0, 0);
-    } else if (strcmp(name, "DECRBY") == 0) {
-        int64_t delta  = -atoll(cmd->elements[2].str);
-        int64_t result = store_incrby(store, cmd->elements[1].str, delta);
-        if (result == LLONG_MIN) {
-            send_error(fd, "value is not an integer or out of range");
-        } else {
-            send_integer(fd, (long)result);
-        }
-    } else if (strcmp(name, "LPUSH") == 0) {
-        cmd_lpush(fd, cmd, store);
-    } else if (strcmp(name, "RPUSH") == 0) {
-        cmd_rpush(fd, cmd, store);
-    } else if (strcmp(name, "LPOP") == 0) {
-        cmd_lpop(fd, cmd, store);
-    } else if (strcmp(name, "RPOP") == 0) {
-        cmd_rpop(fd, cmd, store);
-    } else if (strcmp(name, "LLEN") == 0) {
-        cmd_llen(fd, cmd, store);
-    } else if (strcmp(name, "LRANGE") == 0) {
-        cmd_lrange(fd, cmd, store);
-    } else if (strcmp(name, "BLPOP") == 0) {
-        cmd_blpop(fd, cmd, store);
-    } else if (strcmp(name, "HSET") == 0) {
-        cmd_hset(fd, cmd, store);
-    } else if (strcmp(name, "HGET") == 0) {
-        cmd_hget(fd, cmd, store);
-    } else if (strcmp(name, "HGETALL") == 0) {
-        cmd_hgetall(fd, cmd, store);
-    } else if (strcmp(name, "HMGET") == 0) {
-        cmd_hmget(fd, cmd, store);
-    } else if (strcmp(name, "HDEL") == 0) {
-        cmd_hdel(fd, cmd, store);
-    } else if (strcmp(name, "HLEN") == 0) {
-        cmd_hlen(fd, cmd, store);
-    } else if (strcmp(name, "ZADD") == 0) {
-        cmd_zadd(fd, cmd, store);
-    } else if (strcmp(name, "ZRANGE") == 0) {
-        cmd_zrange(fd, cmd, store);
-    } else if (strcmp(name, "ZRANK") == 0) {
-        cmd_zrank(fd, cmd, store);
-    } else if (strcmp(name, "ZCARD") == 0) {
-        cmd_zcard(fd, cmd, store);
-    } else if (strcmp(name, "ZSCORE") == 0) {
-        cmd_zscore(fd, cmd, store);
-    } else if (strcmp(name, "ZRANGEBYSCORE") == 0) {
-        cmd_zrangebyscore(fd, cmd, store);
-    } else if (strcmp(name, "CONFIG") == 0) {
-        if (cmd->count >= 2) {
-            char sub[16];
-            snprintf(sub, sizeof(sub), "%s", cmd->elements[1].str);
-            str_toupper(sub);
-            if (strcmp(sub, "GET") == 0) {
-                cmd_config_get(fd, cmd, cfg);
-            } else {
-                send_error(fd, "unsupported CONFIG subcommand");
-            }
-        }
-    } else if (strcmp(name, "KEYS") == 0) {
-        cmd_keys(fd, cmd, store);
-    } else if (strcmp(name, "XADD") == 0) {
-        cmd_xadd(fd, cmd, store);
-    } else if (strcmp(name, "XRANGE") == 0) {
-        cmd_xrange(fd, cmd, store);
-    } else if (strcmp(name, "XREAD") == 0) {
-        cmd_xread(fd, cmd, store);
-    } else if (strcmp(name, "GEOADD") == 0) {
-        cmd_geoadd(fd, cmd, store);
-    } else if (strcmp(name, "GEODIST") == 0) {
-        cmd_geodist(fd, cmd, store);
-    } else if (strcmp(name, "GEOPOS") == 0) {
-        cmd_geopos(fd, cmd, store);
-    } else {
-        send_error(fd, "unknown command");
-    }
+CommandResult command_retry_blocked(Server *srv, Client *c, RespValue *req, int timed_out) {
+    const CommandSpec *spec = command_lookup(req->elements[0].str);
+    return run(spec, srv, c, req, 1, timed_out) == CMD_BLOCK ? CMD_RESULT_BLOCKED : CMD_RESULT_DONE;
 }

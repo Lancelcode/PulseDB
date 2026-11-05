@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.compiler }} build and test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (warnings are errors)
+        run: make CC=${{ matrix.compiler }} CFLAGS="-std=c99 -Wall -Wextra -pedantic -Werror -g -O2"
+      - name: Unit and end-to-end tests
+        run: make test CC=${{ matrix.compiler }}
+
+  sanitizers:
+    name: AddressSanitizer + UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tests under ASan/UBSan
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: make sanitize CC=clang
+
+  bench-smoke:
+    name: Benchmark smoke run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run a small benchmark to catch regressions that crash
+        run: make bench BENCH_ARGS="--quick"
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image (runs the test suite inside the build stage)
+        run: docker build -t pulsedb:ci .
+      - name: Start a container and ping it
+        run: |
+          docker run -d --name pulsedb -p 6379:6379 pulsedb:ci
+          for i in $(seq 1 20); do
+            docker exec pulsedb pulsedb-cli ping && exit 0
+            sleep 0.5
+          done
+          docker logs pulsedb
+          exit 1

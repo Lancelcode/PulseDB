@@ -1,0 +1,6 @@
+.git
+build
+pulsedb
+pulsedb-cli
+*.o
+*.rdb
