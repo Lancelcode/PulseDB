@@ -6,7 +6,7 @@
 #include "store.h"
 #include "util.h"
 
-/* djb2 */
+/* djb2, used for the small per-key hash tables */
 static unsigned int hash_key(const char *key, unsigned int num_buckets) {
     unsigned int h = 5381;
     while (*key) {
@@ -16,8 +16,40 @@ static unsigned int hash_key(const char *key, unsigned int num_buckets) {
     return h % num_buckets;
 }
 
+/* 64-bit FNV-1a for the keyspace. The full hash is cached in each entry so
+   chain walks compare integers and only call strcmp on a likely match. */
+static uint64_t hash64(const char *key) {
+    uint64_t h = 1469598103934665603ULL;
+    while (*key) {
+        h ^= (unsigned char)*key++;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
 Store *store_create(void) {
-    return xcalloc(1, sizeof(Store));
+    Store *s   = xcalloc(1, sizeof(Store));
+    s->size    = STORE_INITIAL_BUCKETS;
+    s->buckets = xcalloc(s->size, sizeof(StoreEntry *));
+    return s;
+}
+
+static void store_grow(Store *store) {
+    size_t       new_size = store->size * 2;
+    StoreEntry **nb       = xcalloc(new_size, sizeof(StoreEntry *));
+    for (size_t i = 0; i < store->size; i++) {
+        StoreEntry *e = store->buckets[i];
+        while (e) {
+            StoreEntry *next = e->next;
+            size_t      slot = e->hash & (new_size - 1);
+            e->next  = nb[slot];
+            nb[slot] = e;
+            e = next;
+        }
+    }
+    free(store->buckets);
+    store->buckets = nb;
+    store->size    = new_size;
 }
 
 /* ---------- value lifetime ---------- */
@@ -36,7 +68,21 @@ static void free_hash(Hash *hash) {
     free(hash);
 }
 
+typedef struct ZIndexNode {
+    const char        *member;  /* points at the string owned by the entries array */
+    uint64_t           hash;
+    double             score;
+    struct ZIndexNode *next;
+} ZIndexNode;
+
+static uint64_t hash64(const char *key);
+
 static void free_zset(ZSet *zset) {
+    for (size_t i = 0; i < zset->index_size; i++) {
+        ZIndexNode *n = zset->index[i];
+        while (n) { ZIndexNode *next = n->next; free(n); n = next; }
+    }
+    free(zset->index);
     for (size_t i = 0; i < zset->len; i++) free(zset->entries[i].member);
     free(zset->entries);
     free(zset);
@@ -88,11 +134,11 @@ static int entry_is_expired(const StoreEntry *entry, int64_t now) {
 /* Find a live entry. Expired entries are unlinked and freed on the way
    (lazy expiry), so a key never appears twice in a bucket chain. */
 static StoreEntry *lookup(Store *store, const char *key) {
-    unsigned int slot = hash_key(key, STORE_NUM_BUCKETS);
-    StoreEntry **curr = &store->buckets[slot];
+    uint64_t     h    = hash64(key);
+    StoreEntry **curr = &store->buckets[h & (store->size - 1)];
     while (*curr) {
         StoreEntry *e = *curr;
-        if (strcmp(e->key, key) == 0) {
+        if (e->hash == h && strcmp(e->key, key) == 0) {
             if (e->expires_at != 0 && entry_is_expired(e, now_ms())) {
                 *curr = e->next;
                 entry_free(e);
@@ -107,10 +153,12 @@ static StoreEntry *lookup(Store *store, const char *key) {
 }
 
 static StoreEntry *create_entry(Store *store, const char *key, StoreType type) {
-    unsigned int slot = hash_key(key, STORE_NUM_BUCKETS);
-    StoreEntry  *e    = xcalloc(1, sizeof(StoreEntry));
+    if (store->count >= store->size) store_grow(store);
+    StoreEntry *e = xcalloc(1, sizeof(StoreEntry));
     e->key  = xstrdup(key);
+    e->hash = hash64(key);
     e->type = type;
+    size_t slot = e->hash & (store->size - 1);
     e->next = store->buckets[slot];
     store->buckets[slot] = e;
     store->count++;
@@ -130,11 +178,11 @@ static StoreStatus lookup_typed(Store *store, const char *key, StoreType type, S
 /* ---------- keys ---------- */
 
 int store_del(Store *store, const char *key) {
-    unsigned int slot = hash_key(key, STORE_NUM_BUCKETS);
-    StoreEntry **curr = &store->buckets[slot];
+    uint64_t     h    = hash64(key);
+    StoreEntry **curr = &store->buckets[h & (store->size - 1)];
     while (*curr) {
         StoreEntry *e = *curr;
-        if (strcmp(e->key, key) == 0) {
+        if (e->hash == h && strcmp(e->key, key) == 0) {
             int live = !entry_is_expired(e, now_ms());
             *curr = e->next;
             entry_free(e);
@@ -168,7 +216,7 @@ int64_t store_get_expiry(Store *store, const char *key) {
 
 void store_scan(Store *store, void (*visit)(const StoreEntry *e, void *ctx), void *ctx) {
     int64_t now = now_ms();
-    for (int i = 0; i < STORE_NUM_BUCKETS; i++) {
+    for (size_t i = 0; i < store->size; i++) {
         for (StoreEntry *e = store->buckets[i]; e; e = e->next) {
             if (!entry_is_expired(e, now)) visit(e, ctx);
         }
@@ -355,11 +403,47 @@ static int zset_cmp(double score, const char *member, const ZSetEntry *e) {
     return strcmp(member, e->member);
 }
 
-static long zset_find(const ZSet *zset, const char *member) {
-    for (size_t i = 0; i < zset->len; i++) {
-        if (strcmp(zset->entries[i].member, member) == 0) return (long)i;
+static ZIndexNode *zindex_find(const ZSet *zset, const char *member, uint64_t h) {
+    if (!zset->index_size) return NULL;
+    for (ZIndexNode *n = zset->index[h & (zset->index_size - 1)]; n; n = n->next) {
+        if (n->hash == h && strcmp(n->member, member) == 0) return n;
     }
-    return -1;
+    return NULL;
+}
+
+static void zindex_add(ZSet *zset, const char *member, uint64_t h, double score) {
+    if (zset->len >= zset->index_size) {
+        size_t       size = zset->index_size ? zset->index_size * 2 : 8;
+        ZIndexNode **nb   = xcalloc(size, sizeof(ZIndexNode *));
+        for (size_t i = 0; i < zset->index_size; i++) {
+            ZIndexNode *n = zset->index[i];
+            while (n) {
+                ZIndexNode *next = n->next;
+                n->next = nb[n->hash & (size - 1)];
+                nb[n->hash & (size - 1)] = n;
+                n = next;
+            }
+        }
+        free(zset->index);
+        zset->index      = nb;
+        zset->index_size = size;
+    }
+    ZIndexNode *n = xmalloc(sizeof(ZIndexNode));
+    n->member = member;
+    n->hash   = h;
+    n->score  = score;
+    n->next   = zset->index[h & (zset->index_size - 1)];
+    zset->index[h & (zset->index_size - 1)] = n;
+}
+
+/* First position whose (score, member) is >= the given pair. */
+static size_t zset_lower_bound(const ZSet *zset, double score, const char *member) {
+    size_t lo = 0, hi = zset->len;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (zset_cmp(score, member, &zset->entries[mid]) > 0) lo = mid + 1; else hi = mid;
+    }
+    return lo;
 }
 
 /* Insert (score, member) at its sorted position; member is owned by the set. */
@@ -368,11 +452,7 @@ static void zset_insert(ZSet *zset, double score, char *member) {
         zset->cap = zset->cap ? zset->cap * 2 : 8;
         zset->entries = xrealloc(zset->entries, zset->cap * sizeof(ZSetEntry));
     }
-    size_t lo = 0, hi = zset->len;
-    while (lo < hi) {
-        size_t mid = lo + (hi - lo) / 2;
-        if (zset_cmp(score, member, &zset->entries[mid]) > 0) lo = mid + 1; else hi = mid;
-    }
+    size_t lo = zset_lower_bound(zset, score, member);
     memmove(&zset->entries[lo + 1], &zset->entries[lo], (zset->len - lo) * sizeof(ZSetEntry));
     zset->entries[lo].member = member;
     zset->entries[lo].score  = score;
@@ -387,20 +467,26 @@ StoreStatus store_zset_add(Store *store, const char *key, double score, const ch
         e = create_entry(store, key, STORE_TYPE_ZSET);
         e->v.zset = xcalloc(1, sizeof(ZSet));
     }
-    ZSet *zset = e->v.zset;
-    long  i    = zset_find(zset, member);
-    if (i >= 0) {
+    ZSet       *zset = e->v.zset;
+    uint64_t    h    = hash64(member);
+    ZIndexNode *node = zindex_find(zset, member, h);
+    if (node) {
         if (added) *added = 0;
-        if (zset->entries[i].score == score) return STORE_OK;
-        /* Remove and re-insert so the array stays sorted whether the
-           score went up or down. */
-        char *owned = zset->entries[i].member;
-        memmove(&zset->entries[i], &zset->entries[i + 1], (zset->len - (size_t)i - 1) * sizeof(ZSetEntry));
+        if (node->score == score) return STORE_OK;
+        /* Find the old slot by binary search, then remove and re-insert so
+           the array stays sorted whether the score went up or down. The
+           member string keeps its address, so the index stays valid. */
+        size_t i     = zset_lower_bound(zset, node->score, member);
+        char  *owned = zset->entries[i].member;
+        memmove(&zset->entries[i], &zset->entries[i + 1], (zset->len - i - 1) * sizeof(ZSetEntry));
         zset->len--;
         zset_insert(zset, score, owned);
+        node->score = score;
         return STORE_OK;
     }
-    zset_insert(zset, score, xstrdup(member));
+    char *owned = xstrdup(member);
+    zindex_add(zset, owned, h, score);
+    zset_insert(zset, score, owned);
     if (added) *added = 1;
     return STORE_OK;
 }
@@ -409,9 +495,9 @@ StoreStatus store_zset_score(Store *store, const char *key, const char *member, 
     StoreEntry *e;
     StoreStatus st = lookup_typed(store, key, STORE_TYPE_ZSET, &e);
     if (st != STORE_OK) return st;
-    long i = zset_find(e->v.zset, member);
-    if (i < 0) return STORE_NOT_FOUND;
-    *score = e->v.zset->entries[i].score;
+    ZIndexNode *node = zindex_find(e->v.zset, member, hash64(member));
+    if (!node) return STORE_NOT_FOUND;
+    *score = node->score;
     return STORE_OK;
 }
 
@@ -419,9 +505,9 @@ StoreStatus store_zset_rank(Store *store, const char *key, const char *member, s
     StoreEntry *e;
     StoreStatus st = lookup_typed(store, key, STORE_TYPE_ZSET, &e);
     if (st != STORE_OK) return st;
-    long i = zset_find(e->v.zset, member);
-    if (i < 0) return STORE_NOT_FOUND;
-    *rank = (size_t)i;
+    ZIndexNode *node = zindex_find(e->v.zset, member, hash64(member));
+    if (!node) return STORE_NOT_FOUND;
+    *rank = zset_lower_bound(e->v.zset, node->score, member);
     return STORE_OK;
 }
 
@@ -544,7 +630,7 @@ StoreStatus store_get_stream(Store *store, const char *key, const Stream **strea
 
 void store_destroy(Store *store) {
     if (!store) return;
-    for (int i = 0; i < STORE_NUM_BUCKETS; i++) {
+    for (size_t i = 0; i < store->size; i++) {
         StoreEntry *e = store->buckets[i];
         while (e) {
             StoreEntry *next = e->next;
@@ -552,5 +638,6 @@ void store_destroy(Store *store) {
             e = next;
         }
     }
+    free(store->buckets);
     free(store);
 }

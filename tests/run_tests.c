@@ -13,13 +13,13 @@ void run_test(const char *name, TestFn fn) {
 }
 
 int main(int argc, char **argv) {
-    /* Usage: run_tests [path-to-pulsedb]. Without a server binary only
-       the unit tests run. */
+    /* Usage: run_tests [path-to-pulsedb [path-to-pulsedb-cli]]. Without a
+       server binary only the unit tests run. */
     suite_resp();
     suite_store();
     suite_geo();
     suite_rdb();
-    if (argc > 1) suite_e2e(argv[1]);
+    if (argc > 1) suite_e2e(argv[1], argc > 2 ? argv[2] : NULL);
 
     printf("\n%d checks, %d failures\n", test_checks, test_failures);
     return test_failures == 0 ? 0 : 1;

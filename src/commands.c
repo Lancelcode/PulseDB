@@ -51,58 +51,101 @@ static int cmd_config(CommandCtx *ctx) {
 
 /* ---------- command table ---------- */
 
+typedef enum { KIND_NORMAL, KIND_MULTI, KIND_EXEC, KIND_DISCARD } CommandKind;
+
 typedef struct {
     const char *name;
     int         arity;  /* > 0: exact argc; < 0: at least -arity (argc includes the name) */
     CommandProc proc;
+    CommandKind kind;
 } CommandSpec;
 
 static const CommandSpec command_table[] = {
-    { "ping",          -1, cmd_ping },
-    { "echo",           2, cmd_echo },
-    { "config",        -2, cmd_config },
-    { "keys",           2, cmd_keys },
-    { "set",           -3, cmd_set },
-    { "get",            2, cmd_get },
-    { "incr",           2, cmd_incr },
-    { "decr",           2, cmd_decr },
-    { "incrby",         3, cmd_incrby },
-    { "decrby",         3, cmd_decrby },
-    { "del",           -2, cmd_del },
-    { "exists",        -2, cmd_exists },
-    { "type",           2, cmd_type },
-    { "ttl",            2, cmd_ttl },
-    { "pttl",           2, cmd_pttl },
-    { "lpush",         -3, cmd_lpush },
-    { "rpush",         -3, cmd_rpush },
-    { "lpop",           2, cmd_lpop },
-    { "rpop",           2, cmd_rpop },
-    { "llen",           2, cmd_llen },
-    { "lrange",         4, cmd_lrange },
-    { "blpop",         -3, cmd_blpop },
-    { "hset",          -4, cmd_hset },
-    { "hget",           3, cmd_hget },
-    { "hgetall",        2, cmd_hgetall },
-    { "hmget",         -3, cmd_hmget },
-    { "hdel",          -3, cmd_hdel },
-    { "hlen",           2, cmd_hlen },
-    { "zadd",          -4, cmd_zadd },
-    { "zrange",        -4, cmd_zrange },
-    { "zrangebyscore",  4, cmd_zrangebyscore },
-    { "zrank",          3, cmd_zrank },
-    { "zcard",          2, cmd_zcard },
-    { "zscore",         3, cmd_zscore },
-    { "geoadd",        -5, cmd_geoadd },
-    { "geodist",       -4, cmd_geodist },
-    { "geopos",        -3, cmd_geopos },
-    { "xadd",          -5, cmd_xadd },
-    { "xrange",         4, cmd_xrange },
-    { "xread",         -4, cmd_xread },
+    { "ping",          -1, cmd_ping, KIND_NORMAL },
+    { "echo",           2, cmd_echo, KIND_NORMAL },
+    { "config",        -2, cmd_config, KIND_NORMAL },
+    { "keys",           2, cmd_keys, KIND_NORMAL },
+    { "set",           -3, cmd_set, KIND_NORMAL },
+    { "get",            2, cmd_get, KIND_NORMAL },
+    { "incr",           2, cmd_incr, KIND_NORMAL },
+    { "decr",           2, cmd_decr, KIND_NORMAL },
+    { "incrby",         3, cmd_incrby, KIND_NORMAL },
+    { "decrby",         3, cmd_decrby, KIND_NORMAL },
+    { "del",           -2, cmd_del, KIND_NORMAL },
+    { "exists",        -2, cmd_exists, KIND_NORMAL },
+    { "type",           2, cmd_type, KIND_NORMAL },
+    { "ttl",            2, cmd_ttl, KIND_NORMAL },
+    { "pttl",           2, cmd_pttl, KIND_NORMAL },
+    { "lpush",         -3, cmd_lpush, KIND_NORMAL },
+    { "rpush",         -3, cmd_rpush, KIND_NORMAL },
+    { "lpop",           2, cmd_lpop, KIND_NORMAL },
+    { "rpop",           2, cmd_rpop, KIND_NORMAL },
+    { "llen",           2, cmd_llen, KIND_NORMAL },
+    { "lrange",         4, cmd_lrange, KIND_NORMAL },
+    { "blpop",         -3, cmd_blpop, KIND_NORMAL },
+    { "hset",          -4, cmd_hset, KIND_NORMAL },
+    { "hget",           3, cmd_hget, KIND_NORMAL },
+    { "hgetall",        2, cmd_hgetall, KIND_NORMAL },
+    { "hmget",         -3, cmd_hmget, KIND_NORMAL },
+    { "hdel",          -3, cmd_hdel, KIND_NORMAL },
+    { "hlen",           2, cmd_hlen, KIND_NORMAL },
+    { "zadd",          -4, cmd_zadd, KIND_NORMAL },
+    { "zrange",        -4, cmd_zrange, KIND_NORMAL },
+    { "zrangebyscore",  4, cmd_zrangebyscore, KIND_NORMAL },
+    { "zrank",          3, cmd_zrank, KIND_NORMAL },
+    { "zcard",          2, cmd_zcard, KIND_NORMAL },
+    { "zscore",         3, cmd_zscore, KIND_NORMAL },
+    { "geoadd",        -5, cmd_geoadd, KIND_NORMAL },
+    { "geodist",       -4, cmd_geodist, KIND_NORMAL },
+    { "geopos",        -3, cmd_geopos, KIND_NORMAL },
+    { "xadd",          -5, cmd_xadd, KIND_NORMAL },
+    { "xrange",         4, cmd_xrange, KIND_NORMAL },
+    { "xread",         -4, cmd_xread, KIND_NORMAL },
+    { "multi",          1, NULL, KIND_MULTI },
+    { "exec",           1, NULL, KIND_EXEC },
+    { "discard",        1, NULL, KIND_DISCARD },
 };
 
+#define NUM_COMMANDS      (sizeof(command_table) / sizeof(command_table[0]))
+#define LOOKUP_SLOTS      128   /* power of two, comfortably above NUM_COMMANDS */
+#define MAX_COMMAND_NAME  32
+
+/* Open-addressing table from lower-cased command name to spec, built on
+   first use. Replaces a linear strcasecmp scan of the whole table, which
+   showed up as a hot spot when profiling small pipelined requests. */
+static const CommandSpec *lookup_slots[LOOKUP_SLOTS];
+
+static unsigned name_hash(const char *s) {
+    unsigned h = 2166136261u;
+    for (; *s; s++) { h ^= (unsigned char)*s; h *= 16777619u; }
+    return h;
+}
+
+static void build_lookup(void) {
+    for (size_t i = 0; i < NUM_COMMANDS; i++) {
+        unsigned slot = name_hash(command_table[i].name) & (LOOKUP_SLOTS - 1);
+        while (lookup_slots[slot]) slot = (slot + 1) & (LOOKUP_SLOTS - 1);
+        lookup_slots[slot] = &command_table[i];
+    }
+}
+
 static const CommandSpec *command_lookup(const char *name) {
-    for (size_t i = 0; i < sizeof(command_table) / sizeof(command_table[0]); i++) {
-        if (strcasecmp(command_table[i].name, name) == 0) return &command_table[i];
+    static int built = 0;
+    if (!built) { build_lookup(); built = 1; }
+
+    char   lower[MAX_COMMAND_NAME];
+    size_t n = 0;
+    for (; name[n]; n++) {
+        if (n + 1 >= sizeof(lower)) return NULL;  /* longer than any command */
+        char c = name[n];
+        lower[n] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+    }
+    lower[n] = '\0';
+
+    unsigned slot = name_hash(lower) & (LOOKUP_SLOTS - 1);
+    while (lookup_slots[slot]) {
+        if (strcmp(lookup_slots[slot]->name, lower) == 0) return lookup_slots[slot];
+        slot = (slot + 1) & (LOOKUP_SLOTS - 1);
     }
     return NULL;
 }
@@ -156,31 +199,30 @@ static void exec_transaction(Server *srv, Client *c) {
 }
 
 CommandResult command_process(Server *srv, Client *c, RespValue *req) {
-    const char *name = req->elements[0].str;
-    Txn        *txn  = &c->txn;
-
-    if (strcasecmp(name, "multi") == 0 && req->count == 1) {
-        if (txn->active) reply_error(&c->out, "ERR MULTI calls can not be nested");
-        else { txn->active = 1; reply_simple(&c->out, "OK"); }
-        return CMD_RESULT_DONE;
-    }
-    if (strcasecmp(name, "exec") == 0 && req->count == 1) {
-        if (!txn->active) reply_error(&c->out, "ERR EXEC without MULTI");
-        else exec_transaction(srv, c);
-        return CMD_RESULT_DONE;
-    }
-    if (strcasecmp(name, "discard") == 0 && req->count == 1) {
-        if (!txn->active) reply_error(&c->out, "ERR DISCARD without MULTI");
-        else { txn_reset(txn); reply_simple(&c->out, "OK"); }
-        return CMD_RESULT_DONE;
-    }
-
+    Txn               *txn  = &c->txn;
     const CommandSpec *spec = validate(c, req);
     if (!spec) {
         /* A command rejected while queuing poisons the transaction, so
            EXEC later fails as a whole instead of running half of it. */
         if (txn->active) txn->error = 1;
         return CMD_RESULT_DONE;
+    }
+
+    switch (spec->kind) {
+    case KIND_MULTI:
+        if (txn->active) reply_error(&c->out, "ERR MULTI calls can not be nested");
+        else { txn->active = 1; reply_simple(&c->out, "OK"); }
+        return CMD_RESULT_DONE;
+    case KIND_EXEC:
+        if (!txn->active) reply_error(&c->out, "ERR EXEC without MULTI");
+        else exec_transaction(srv, c);
+        return CMD_RESULT_DONE;
+    case KIND_DISCARD:
+        if (!txn->active) reply_error(&c->out, "ERR DISCARD without MULTI");
+        else { txn_reset(txn); reply_simple(&c->out, "OK"); }
+        return CMD_RESULT_DONE;
+    case KIND_NORMAL:
+        break;
     }
 
     if (txn->active) {

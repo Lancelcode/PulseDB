@@ -1,5 +1,6 @@
-# compiled binary
+# compiled binaries
 pulsedb
+pulsedb-cli
 
 # object files
 *.o

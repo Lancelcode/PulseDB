@@ -8,7 +8,7 @@
    The structures below are exposed read-only so command handlers can
    stream replies without copying; only store_* functions mutate them. */
 
-#define STORE_NUM_BUCKETS 1024
+#define STORE_INITIAL_BUCKETS 16
 #define HASH_NUM_BUCKETS  64
 
 typedef struct ListNode {
@@ -39,11 +39,16 @@ typedef struct {
     double  score;
 } ZSetEntry;
 
-/* Sorted set: array ordered by (score, member). */
+struct ZIndexNode;
+
+/* Sorted set: an array ordered by (score, member) for range queries, plus
+   a hash index from member to score so lookups by name do not scan. */
 typedef struct {
-    ZSetEntry *entries;
-    size_t     len;
-    size_t     cap;
+    ZSetEntry          *entries;
+    size_t              len;
+    size_t              cap;
+    struct ZIndexNode **index;       /* buckets; members are borrowed from entries */
+    size_t              index_size;  /* power of two */
 } ZSet;
 
 typedef struct {
@@ -83,6 +88,7 @@ typedef enum {
 
 typedef struct StoreEntry {
     char              *key;
+    uint64_t           hash;        /* cached hash of key */
     StoreType          type;
     int64_t            expires_at;  /* unix ms, 0 = never */
     struct StoreEntry *next;
@@ -95,9 +101,12 @@ typedef struct StoreEntry {
     } v;
 } StoreEntry;
 
+/* The bucket array doubles when the number of keys exceeds the number of
+   buckets, keeping chains short however large the keyspace grows. */
 typedef struct {
-    StoreEntry *buckets[STORE_NUM_BUCKETS];
-    size_t      count;
+    StoreEntry **buckets;
+    size_t       size;   /* number of buckets, always a power of two */
+    size_t       count;
 } Store;
 
 typedef enum {

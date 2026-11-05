@@ -165,6 +165,9 @@ static void test_errors_do_not_crash(void) {
     CHECK_STR(cmd(c1, 2, "NOPE", "x"), "-ERR unknown command 'NOPE'");
     CHECK_STR(cmd(c1, 3, "LPUSH", "l", "a"), ":1");
     CHECK_STR(cmd(c1, 2, "GET", "l"), "-WRONGTYPE Operation against a key holding the wrong kind of value");
+    CHECK_STR(cmd(c1, 1, "pInG"), "+PONG");  /* names are case-insensitive */
+    CHECK_STR(cmd(c1, 1, "zrangebyscorezrangebyscorezrangebyscore"),
+              "-ERR unknown command 'zrangebyscorezrangebyscorezrangebyscore'");
     CHECK_STR(cmd(c1, 1, "PING"), "+PONG");  /* connection still usable */
 }
 
@@ -277,7 +280,36 @@ static void test_protocol_error_closes_connection(void) {
     CHECK_STR(cmd(c1, 1, "PING"), "+PONG");
 }
 
-void suite_e2e(const char *server_path) {
+static const char *cli;
+
+/* Run a shell command and capture its stdout. */
+static const char *capture(const char *shell_cmd) {
+    static char out[4096];
+    FILE *p = popen(shell_cmd, "r");
+    size_t n = p ? fread(out, 1, sizeof(out) - 1, p) : 0;
+    out[n] = '\0';
+    if (p) pclose(p);
+    return out;
+}
+
+static void test_cli(void) {
+    char shell[1024];
+    snprintf(shell, sizeof(shell), "%s -p %d set cli:greeting 'hello world'", cli, server_port);
+    CHECK_STR(capture(shell), "OK\n");
+    snprintf(shell, sizeof(shell), "%s -p %d get cli:greeting", cli, server_port);
+    CHECK_STR(capture(shell), "\"hello world\"\n");
+
+    /* REPL mode reading from a pipe: quoting, arrays, errors, integers. */
+    snprintf(shell, sizeof(shell),
+             "printf 'rpush cli:l a \"b c\"\\nlrange cli:l 0 -1\\nincr cli:greeting\\nget nope\\nquit\\n'"
+             " | %s -p %d", cli, server_port);
+    CHECK_STR(capture(shell),
+              "(integer) 2\n1) \"a\"\n2) \"b c\"\n"
+              "(error) ERR value is not an integer or out of range\n(nil)\n");
+}
+
+void suite_e2e(const char *server_path, const char *cli_path) {
+    cli = cli_path;
     signal(SIGPIPE, SIG_IGN);
     buffer_init(&pending);
     if (start_server(server_path) < 0 || (c1 = connect_client()) < 0) {
@@ -295,6 +327,7 @@ void suite_e2e(const char *server_path) {
     run_test("e2e: BLPOP wakes up and times out", test_blpop_does_not_block_server);
     run_test("e2e: idle client does not stall others", test_idle_client_does_not_block_server);
     run_test("e2e: protocol error closes connection", test_protocol_error_closes_connection);
+    if (cli) run_test("e2e: pulsedb-cli one-shot and REPL modes", test_cli);
     close(c1);
     int status = stop_server();
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);  /* clean shutdown */
